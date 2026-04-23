@@ -226,18 +226,23 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
 
     Factory activation & capacity ramp
     ----------------------------------
-    One unified flag `factory_active_from` controls both Semi/FP processing
-    gating and the capacity ramp counters (pn/sn/fn). It is set to 1 at sim
-    start if kickstart=True and any init RM/Semi exists; otherwise it is set
-    to the week of the first supplier order. Ramp counters advance starting
-    the week AFTER factory activation.
+    Two independent gates control processing:
+
+      1. `factory_active_from` is set ONLY by the first supplier order. Once
+         set, Semi and FP processing run every week (capacity-limited) and
+         the ramp counters (pn/sn/fn) advance from the next week.
+
+      2. `kickstart` (one-shot at W1): if True and initial RM or Semi exists,
+         Semi and FP each run ONCE at W1 only — pushing one wave of initial
+         WIP one stage forward. This unsticks seasonal scenarios where the
+         planner never orders because initial stock is well-sized. After W1,
+         processing pauses again and waits for the first real order.
 
     Parameters
     ----------
     kickstart : bool
-        If True, factory becomes active at W1 when initial RM/Semi exist
-        (prevents initial stock from being stuck forever in seasonal/flat
-        scenarios where the planner never orders).
+        If True, do a one-shot Semi+FP processing pass at W1 when initial
+        RM/Semi exist. Does NOT permanently activate the factory.
     debug : bool
         If True, runtime sanity assertions are active (conservation checks).
     custom_demand : sequence or None
@@ -285,11 +290,11 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
     cas = 0.0                  # cumulative units arrived at stores
     smart_discovered = False   # planner discovers A/B imbalance at first review
 
-    # Unified factory-activation flag (see docstring)
-    if kickstart and (init_rawmat > 0 or init_semi > 0):
-        factory_active_from = 1
-    else:
-        factory_active_from = None
+    # Two independent gates (see docstring):
+    #   factory_active_from — set on first supplier order, then permanent
+    #   do_kickstart        — one-shot processing at W1 only
+    factory_active_from = None
+    do_kickstart = kickstart and (init_rawmat > 0 or init_semi > 0)
 
     order_weeks = list(range(order_freq, weeks + 1, order_freq)) if order_freq > 1 else list(range(1, weeks + 1))
     ff = float(base_forecast)  # forecast — updates on review weeks only
@@ -409,9 +414,14 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
                 factory_active_from = w
         s['order'] = round(od, 0)
 
-        # 6. Semi processing (RM → Semi) — gated on factory activation
+        # Processing is allowed when either:
+        #   (a) the factory has been activated by a real order, OR
+        #   (b) we're in the one-shot kickstart window (W1 only)
+        allow_proc = (factory_active_from is not None) or (do_kickstart and w == 1)
+
+        # 6. Semi processing (RM → Semi)
         sc_ = min(cap_start * (1 + sn * cap_ramp), cap_start * 10)
-        if raw_mat > 0.01 and factory_active_from is not None:
+        if raw_mat > 0.01 and allow_proc:
             si = math.ceil(min(raw_mat, sc_))
             raw_mat -= si
         else:
@@ -420,9 +430,9 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
         s['semi_cap']   = round(sc_, 0)
         s['raw_mat_stock'] = round(raw_mat, 1)
 
-        # 7. FP processing (Semi → FP) — gated on factory activation
+        # 7. FP processing (Semi → FP)
         fpc = min(cap_start * (1 + fn * cap_ramp), cap_start * 10)
-        if semi > 0.01 and factory_active_from is not None:
+        if semi > 0.01 and allow_proc:
             fi = math.ceil(min(semi, fpc))
             semi -= fi
         else:
