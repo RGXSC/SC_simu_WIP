@@ -766,7 +766,350 @@ def reconciliation_report(states, kpis, params):
 # ════════════════════════════════════════════════════════════════
 # DIAGRAM BUILDERS — module-level helpers
 # ════════════════════════════════════════════════════════════════
-# (filled in next chunk)
+#
+# Design rules (all enforced below):
+#   - Stage columns ALWAYS in one horizontal row; only weeks within a stage
+#     wrap (after 8 boxes, wrap to a second row WITHIN that stage).
+#   - No black contours — fill-only, borderless, rounded 6px.
+#   - Arial font throughout; grey-blue neutral palette.
+#   - CARD_W (supplier/store) = 98px; week-box width adaptive.
+#   - Exactly one `st.components.v1.html` call at render time (see main page).
+#   - JS wrapper scales the diagram to fit parent width via transform:scale().
+
+# --- Palette ---
+C_TXT        = '#2a3a4e'
+C_TXT_L      = '#5a6a7e'
+C_BOX_FILL   = '#4a6280'
+C_BOX_FG     = '#ffffff'
+C_BOX_EMPTY  = '#e8ecf2'
+C_BOX_EMPTY_FG = '#8a96a6'
+C_HEADER_BG  = '#dce3ed'
+C_HEADER_FG  = '#2a3a4e'
+C_WIP_BG     = '#e4e9f0'
+C_WIP_ACCENT = '#4a6280'
+C_PROC_SHADOW = '#2a4058'
+C_SUP_BG     = '#2a3a52'
+C_STORE_BG   = '#f4f6f9'
+C_LOST_BG    = '#c05050'
+C_LOST_FG    = '#ffffff'
+
+CARD_W = 98
+MAX_PER_ROW = 8   # wrap after 8 boxes within a stage
+GAP_PX = 3
+
+
+def _compute_box_dims(total_boxes_row: int) -> tuple[int, int]:
+    """
+    Adaptive week-box dimensions. Returns (width, height) in px.
+
+        width  = (1300 − 3×CARD_W − 60) / total_boxes_row − GAP_PX,
+                 clamped to [44, 110]
+        height = width − 8, clamped to [50, 74]
+    """
+    available = 1300 - 3 * CARD_W - 60
+    target_w = (available / max(total_boxes_row, 1)) - GAP_PX
+    box_w = max(44, min(110, int(target_w)))
+    box_h = max(50, min(74, box_w - 8))
+    return box_w, box_h
+
+
+def week_box(qty: float, box_w: int, box_h: int, is_proc: bool = False) -> str:
+    """
+    One week slot within a stage band. Rounded, borderless, filled if qty > 0.
+
+    The 'processing' (last) week of a stage gets a subtle left inset shadow
+    instead of a contour to avoid visual noise.
+    """
+    if qty > 0.5:
+        bg, fg, weight = C_BOX_FILL, C_BOX_FG, "700"
+        content = f"{qty:.0f}"
+    else:
+        bg, fg, weight = C_BOX_EMPTY, C_BOX_EMPTY_FG, "400"
+        content = ""
+    proc = f"box-shadow: inset 3px 0 0 {C_PROC_SHADOW};" if is_proc else ""
+    return (
+        f'<div style="width:{box_w}px;height:{box_h}px;background:{bg};'
+        f'border:none;border-radius:6px;display:flex;align-items:center;'
+        f'justify-content:center;font-size:15px;font-weight:{weight};'
+        f'color:{fg};{proc}box-sizing:border-box;">{content}</div>'
+    )
+
+
+def band_header(label: str, width_px: int) -> str:
+    """Soft header strip above a stage's week boxes."""
+    return (
+        f'<div style="width:{width_px}px;background:{C_HEADER_BG};'
+        f'border-radius:6px;padding:6px 4px;text-align:center;font-size:12px;'
+        f'font-weight:600;color:{C_HEADER_FG};box-sizing:border-box;">{label}</div>'
+    )
+
+
+def wip_label(label: str, value: float, width_px: int) -> str:
+    """WIP total row — visible accent anchoring it to its stage."""
+    return (
+        f'<div style="width:{width_px}px;background:{C_WIP_BG};'
+        f'border-left:3px solid {C_WIP_ACCENT};border-radius:4px;padding:5px 8px;'
+        f'display:flex;justify-content:space-between;align-items:center;'
+        f'font-size:11px;color:{C_TXT};box-sizing:border-box;">'
+        f'<span style="font-weight:600;color:{C_WIP_ACCENT};">{label}</span>'
+        f'<span style="font-weight:800;color:#1a2a3e;font-size:12px;">{value:.0f}</span></div>'
+    )
+
+
+def boxes_row(weeks: list[float], box_w: int, box_h: int,
+              proc_last: bool = True, weeks_labels_start: int = 1) -> str:
+    """
+    Render a stage's week boxes with W-labels above. Wraps to multiple rows
+    if len(weeks) > MAX_PER_ROW.
+    """
+    n = len(weeks)
+    if n == 0:
+        return ""
+    rows_html = []
+    for start in range(0, n, MAX_PER_ROW):
+        end = min(start + MAX_PER_ROW, n)
+        chunk = weeks[start:end]
+        labels_html = "".join(
+            f'<div style="width:{box_w}px;text-align:center;font-size:10px;'
+            f'color:{C_TXT_L};font-weight:600;margin-bottom:2px;">W{weeks_labels_start + start + i}</div>'
+            for i in range(len(chunk))
+        )
+        boxes_html = "".join(
+            week_box(chunk[i], box_w, box_h, is_proc=(proc_last and (start + i) == n - 1))
+            for i in range(len(chunk))
+        )
+        rows_html.append(
+            f'<div style="display:flex;gap:{GAP_PX}px;">{labels_html}</div>'
+            f'<div style="display:flex;gap:{GAP_PX}px;margin-top:2px;margin-bottom:4px;">{boxes_html}</div>'
+        )
+    return "".join(rows_html)
+
+
+def _band_width(n_weeks: int, box_w: int) -> int:
+    """Visual width of a band header = width of one capped row of boxes."""
+    cols = min(n_weeks, MAX_PER_ROW)
+    return cols * box_w + (cols - 1) * GAP_PX + 8
+
+
+def stage_col(label: str, weeks_list: list[float], box_w: int, box_h: int,
+              wip_value: float, wip_txt: str, weeks_start: int) -> str:
+    """One complete stage column: header, labelled week boxes, WIP total."""
+    band_w = _band_width(len(weeks_list), box_w)
+    return (
+        f'<div style="display:flex;flex-direction:column;align-items:center;gap:4px;">'
+        f'{band_header(label, band_w)}'
+        f'<div>{boxes_row(weeks_list, box_w, box_h, proc_last=True, weeks_labels_start=weeks_start)}</div>'
+        f'{wip_label(wip_txt, wip_value, band_w)}'
+        f'</div>'
+    )
+
+
+def supplier_card(backlog: float, cap: float, box_h: int) -> str:
+    """Left-hand supplier card: Order header, backlog count, capacity footer."""
+    return (
+        f'<div style="display:flex;flex-direction:column;align-items:center;gap:4px;">'
+        f'{band_header("Order", CARD_W)}'
+        f'<div style="width:{CARD_W}px;height:{box_h + 20}px;background:{C_SUP_BG};'
+        f'border-radius:6px;padding:4px 6px;display:flex;flex-direction:column;'
+        f'align-items:center;justify-content:center;color:#fff;box-sizing:border-box;">'
+        f'<div style="font-size:10px;font-weight:500;color:#9aaec6;'
+        f'text-transform:uppercase;letter-spacing:0.5px;">Supplier</div>'
+        f'<div style="font-size:20px;font-weight:700;">{backlog:.0f}</div>'
+        f'</div>'
+        f'<div style="width:{CARD_W}px;background:#f4f6f9;border-radius:5px;'
+        f'padding:5px 8px;font-size:10px;color:{C_TXT};display:flex;'
+        f'justify-content:space-between;box-sizing:border-box;">'
+        f'<span style="color:{C_TXT_L};font-weight:500;">Cap</span>'
+        f'<span style="font-weight:700;color:#2a3a4e;">{cap:.0f}</span></div>'
+        f'</div>'
+    )
+
+
+def store_card(letter: str, stock: float, dem: float, sales: float, lost: float) -> str:
+    """
+    Compact store card: STOCK value + DEM/SOLD row + LOST pill if lost > 0.5.
+    LOST badge is rendered inline-block with margin-top to avoid clipping.
+    """
+    is_alert = lost > 0.5
+    bg = '#fef0f0' if is_alert else C_STORE_BG
+    accent = '#c05050' if is_alert else 'transparent'
+    alert_shadow = f"box-shadow: inset 3px 0 0 {accent};" if is_alert else ""
+    lost_badge = (
+        f'<div style="margin-top:5px;background:{C_LOST_BG};color:{C_LOST_FG};'
+        f'padding:1px 5px;border-radius:3px;font-size:9px;font-weight:700;'
+        f'letter-spacing:0.3px;display:inline-block;">LOST {int(lost)}</div>'
+    ) if is_alert else ''
+    return (
+        f'<div style="display:flex;flex-direction:column;gap:3px;">'
+        f'{band_header(f"Store {letter}", CARD_W)}'
+        f'<div style="width:{CARD_W}px;background:{bg};{alert_shadow}'
+        f'border-radius:6px;padding:8px 6px;text-align:center;'
+        f'box-sizing:border-box;color:{C_TXT};">'
+        f'<div style="color:{C_TXT_L};font-weight:500;font-size:9px;'
+        f'text-transform:uppercase;letter-spacing:0.3px;">Stock</div>'
+        f'<div style="font-size:20px;font-weight:700;color:{C_TXT};line-height:1.1;'
+        f'margin:2px 0 6px;">{stock:.0f}</div>'
+        f'<div style="display:flex;justify-content:space-between;padding:0 6px;'
+        f'gap:8px;font-size:9px;">'
+        f'<div style="text-align:center;"><div style="color:{C_TXT_L};'
+        f'text-transform:uppercase;letter-spacing:0.3px;">Dem</div>'
+        f'<div style="font-size:13px;font-weight:600;color:{C_TXT};'
+        f'line-height:1.1;margin-top:2px;">{dem:.0f}</div></div>'
+        f'<div style="text-align:center;"><div style="color:{C_TXT_L};'
+        f'text-transform:uppercase;letter-spacing:0.3px;">Sold</div>'
+        f'<div style="font-size:13px;font-weight:600;color:#2a5a3a;'
+        f'line-height:1.1;margin-top:2px;">{sales:.0f}</div></div>'
+        f'</div>{lost_badge}</div></div>'
+    )
+
+
+def make_sc_html(state: dict, params: dict) -> str:
+    """
+    Render the full week-by-week supply-chain flow diagram.
+
+    Layout: supplier card | [Material | Semi | Finish+CW | Distribution] | stores
+    Stages are always in a single horizontal row; weeks within a stage wrap
+    after MAX_PER_ROW. Stores are stacked vertically on the right.
+
+    Returns a single HTML string (one st.components.v1.html call expected).
+    """
+    mat_lt  = params['mat_lt']
+    semi_lt = params['semi_lt']
+    fp_lt   = params['fp_lt']
+    dist_lt = params['dist_lt']
+
+    total_boxes_row = (min(mat_lt, MAX_PER_ROW) + min(semi_lt, MAX_PER_ROW)
+                     + min(fp_lt, MAX_PER_ROW)  + min(dist_lt, MAX_PER_ROW))
+    box_w, box_h = _compute_box_dims(total_boxes_row)
+
+    # Pipe → displayed weeks: reversed so W1 is leftmost, W_last is rightmost.
+    # Stage buffer stock is added to the LAST week of its band (about to exit).
+    def _reversed(lst): return list(reversed(lst)) if lst else []
+
+    mat_weeks  = _reversed(state.get('mat_pipe', []))
+    semi_weeks = _reversed(state.get('semi_pipe', []))
+    fp_weeks   = _reversed(state.get('fp_pipe', []))
+    raw_mat = state.get('raw_mat_stock', 0)
+    semi    = state.get('semi_stock', 0)
+    cw      = state.get('cw_stock', 0)
+
+    if mat_weeks:  mat_weeks[-1]  = mat_weeks[-1]  + raw_mat
+    if semi_weeks: semi_weeks[-1] = semi_weeks[-1] + semi
+    if fp_weeks:   fp_weeks[-1]   = fp_weeks[-1]   + cw
+
+    dist_a = _reversed(state.get('dist_pipe_a', []))
+    dist_b = _reversed(state.get('dist_pipe_b', []))
+    dist_combined = [dist_a[i] + dist_b[i] for i in range(len(dist_a))] if dist_a else []
+
+    # WIP per band
+    wip_mat  = sum(state.get('mat_pipe', []))    + raw_mat
+    wip_semi = sum(state.get('semi_pipe', []))   + semi
+    wip_fp   = sum(state.get('fp_pipe', []))     + cw
+    wip_da   = sum(state.get('dist_pipe_a', []))
+    wip_db   = sum(state.get('dist_pipe_b', []))
+
+    # Stage columns
+    mat_label  = f"Mat ({mat_lt}wk)"       if mat_lt <= 2 else f"Material ({mat_lt}wk)"
+    semi_label = f"Semi ({semi_lt}wk)"
+    fp_label   = f"Finish ({fp_lt}wk)"     if fp_lt <= 2 else f"Finish+CW ({fp_lt}wk)"
+    dist_label = f"Dist ({dist_lt}wk)"     if dist_lt <= 2 else f"Distribution ({dist_lt}wk)"
+
+    mat_col = stage_col(mat_label, mat_weeks, box_w, box_h, wip_mat, "WIP", 1)
+    semi_col = stage_col(semi_label, semi_weeks, box_w, box_h, wip_semi, "WIP", mat_lt + 1)
+    fp_col = stage_col(fp_label, fp_weeks, box_w, box_h, wip_fp, "WIP", mat_lt + semi_lt + 1)
+
+    dist_band_w = _band_width(dist_lt, box_w)
+    dist_col = (
+        f'<div style="display:flex;flex-direction:column;align-items:center;gap:4px;">'
+        f'{band_header(dist_label, dist_band_w)}'
+        f'<div>{boxes_row(dist_combined, box_w, box_h, proc_last=True, weeks_labels_start=mat_lt + semi_lt + fp_lt + 1)}</div>'
+        f'<div style="display:flex;flex-direction:column;gap:3px;width:{dist_band_w}px;">'
+        f'{wip_label("WIP A", wip_da, dist_band_w)}'
+        f'{wip_label("WIP B", wip_db, dist_band_w)}'
+        f'</div></div>'
+    )
+
+    # Supplier + stacked stores
+    sup_html = supplier_card(state.get('backlog', 0), state.get('supplier_cap', 0), box_h)
+    store_a_html = store_card("A", state.get('store_a', 0), state.get('demand_a', 0),
+                              state.get('sales_a', 0), state.get('missed_a', 0))
+    store_b_html = store_card("B", state.get('store_b', 0), state.get('demand_b', 0),
+                              state.get('sales_b', 0), state.get('missed_b', 0))
+    stores_html = (
+        f'<div style="display:flex;flex-direction:column;gap:6px;justify-content:center;'
+        f'align-self:stretch;">{store_a_html}{store_b_html}</div>'
+    )
+
+    main = (
+        f'<div style="display:flex;align-items:center;gap:10px;">'
+        f'<div style="display:flex;align-items:flex-start;gap:10px;">'
+        f'{sup_html}{mat_col}{semi_col}{fp_col}{dist_col}</div>'
+        f'{stores_html}</div>'
+    )
+
+    # Info bar (top) + comment (bottom)
+    order_html = (
+        f'<b style="color:#2a5a3a;font-size:13px;">ORDER {state["order"]:.0f}</b>'
+        if state.get('order', 0) > 0 else f'<span style="color:{C_TXT_L};">No order</span>'
+    )
+    info_bar = (
+        f'<div style="display:flex;justify-content:space-between;align-items:center;'
+        f'padding:8px 16px;background:linear-gradient(90deg,#f4f6f9,#eef1f6);'
+        f'border:1px solid #dde2ea;border-radius:8px;margin-bottom:10px;'
+        f'font-family:Arial,Helvetica,sans-serif;">'
+        f'<span style="font-size:12px;color:{C_TXT};">Backlog <b style="color:#8a3030;">{state.get("backlog", 0):.0f}</b></span>'
+        f'<span style="font-size:12px;color:{C_TXT};">Pending <b style="color:#8a6a20;">{state.get("pending", 0):.0f}</b></span>'
+        f'<span style="font-size:12px;color:{C_TXT};">WIP <b style="color:#2a5a8a;">{state.get("wip_total", 0):.0f}</b></span>'
+        f'<span style="font-size:12px;">{order_html}</span>'
+        f'<span style="font-size:12px;color:{C_TXT};">Forecast <b style="color:#1a2a40;">{state.get("forecast", 0):.0f}</b>/wk</span>'
+        f'<span style="font-size:12px;color:{C_TXT};">A:{params.get("store_a_pct", 60)}% B:{100 - params.get("store_a_pct", 60)}%</span>'
+        f'</div>'
+    )
+    comment = state.get('comment', '')
+    comment_html = (
+        f'<div style="padding:8px 16px;font-size:11px;color:{C_TXT};line-height:1.5;'
+        f'background:#f8f9fb;border:1px solid #e8ecf0;border-radius:6px;margin-top:10px;">{comment}</div>'
+        if comment else ''
+    )
+    physical_flow = (
+        f'<div style="text-align:center;padding:8px 0;">'
+        f'<span style="font-size:10px;color:{C_TXT_L};letter-spacing:2px;font-weight:700;">'
+        f'- - - PHYSICAL FLOW (GOODS) - - -</span></div>'
+    )
+
+    # Intrinsic width — used by the JS scaler to compute fit-to-parent ratio
+    intrinsic_w = (min(mat_lt, MAX_PER_ROW) + min(semi_lt, MAX_PER_ROW)
+                 + min(fp_lt, MAX_PER_ROW)  + min(dist_lt, MAX_PER_ROW)) * (box_w + GAP_PX)
+    intrinsic_w += 3 * CARD_W + 60
+
+    container = (
+        f'<div style="font-family:Arial,Helvetica,sans-serif;padding:8px;'
+        f'background:linear-gradient(90deg,#f6f8fa,#f0f2f6);'
+        f'border:1px solid #dde2ea;border-radius:12px;'
+        f'width:100%;box-sizing:border-box;overflow:hidden;">'
+        f'<div id="sc-scaler" style="transform-origin:top left;width:{intrinsic_w}px;">'
+        f'{main}</div>'
+        f'</div>'
+        f'<script>'
+        f'(function(){{'
+        f'  var scaler=document.getElementById("sc-scaler");'
+        f'  if(!scaler) return;'
+        f'  var natural={intrinsic_w};'
+        f'  var wrapper=scaler.parentElement;'
+        f'  function fit(){{'
+        f'    var avail=wrapper.clientWidth - 16;'
+        f'    var scale=Math.min(1, avail/natural);'
+        f'    scaler.style.transform="scale("+scale+")";'
+        f'    wrapper.style.height=(scaler.offsetHeight*scale + 16)+"px";'
+        f'  }}'
+        f'  fit();'
+        f'  window.addEventListener("resize",fit);'
+        f'  setTimeout(fit,100);setTimeout(fit,500);'
+        f'}})();'
+        f'</script>'
+    )
+
+    return f'<div style="font-family:Arial,Helvetica,sans-serif;">{info_bar}{container}{physical_flow}{comment_html}</div>'
 
 
 # ════════════════════════════════════════════════════════════════
