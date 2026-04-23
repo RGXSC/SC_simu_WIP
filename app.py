@@ -1386,9 +1386,9 @@ with st.sidebar:
              "expander on the main page with reconciliation diagnostics.",
     )
 
-    # --- Quick scenarios: operational grid (3 LT × 3 demand) ---
+    # --- Quick scenarios: permanent grid (3 LT × 3 demand) ---
     st.markdown("---")
-    st.markdown("### \U0001f3af Quick Scenarios — Operational")
+    st.markdown("### \U0001f3af Quick Scenarios — Permanent")
     st.caption("3 LT × 3 Demand · stock auto-sized to coverage·100 · "
                "Agile 60/20/10/10, Medium 80/20/0/0, Push 100/0/0/0 · "
                "A=60%, smart ON, kickstart OFF (initial WIP gated by first order)")
@@ -1455,7 +1455,7 @@ with st.sidebar:
                         args=("Push", "Seasonal"), kwargs={"seas_avg": 300, "seas_sub": "Steep"})
 
     st.caption(
-        "**Operational** presets gate initial WIP behind the first order — "
+        "**Permanent** presets gate initial WIP behind the first order — "
         "Drop scenarios stay efficient because the factory waits to ramp.\n\n"
         "**Seasonal** presets enable kickstart so well-sized initial stock "
         "doesn't get permanently stuck when the planner sees no need to order."
