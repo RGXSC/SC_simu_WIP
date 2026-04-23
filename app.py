@@ -103,7 +103,7 @@ _DEFAULTS = {
     "store_pct": 40, "wh_pct": 20, "semi_pct": 10,
     "store_a_pct": 60, "smart_distrib": True,
     "demand_shape": DEMAND_SHAPES[0],
-    "kickstart": True,
+    "kickstart": False,
     "debug_mode": False,
     "week_num": 0,
     "seas_sub": "Steep",
@@ -1138,16 +1138,16 @@ def make_sc_html(state: dict, params: dict) -> str:
 # PRESET APPLICATION
 # ════════════════════════════════════════════════════════════════
 #
-# Two preset families (18 buttons total) with deliberately different defaults:
-#   1. Operational grid: 3 LT × 3 demand shapes (Flat / Growth / Drop)
+# Two preset families (18 buttons total):
+#   1. Permanent grid: 3 LT × 3 demand shapes (Flat / Growth / Drop)
 #        - Stock auto-sized to coverage × BASE_FORECAST
 #        - Distributions: STOCK_DIST_OPERATIONAL
-#        - Kickstart OFF (initial WIP gated by first order)
 #   2. Seasonal grid: 3 LT × 3 seasonal averages (30 / 100 / 300), Steep curve
 #        - Stock fixed at PRESET_INIT_STOCK_SEASONAL (2600)
 #        - Distributions: STOCK_DIST_SEASONAL
-#        - Kickstart ON (unsticks pre-positioned RM/Semi when planner doesn't order)
-# Common to both: A=60%, smart distribution ON.
+#
+# Common to all 18 presets: A=60%, smart distribution ON, kickstart OFF.
+# Initial WIP (RM/Semi) only ever moves after the first supplier order.
 
 def apply_preset(lt_name: str, demand_kind: str, *,
                  lr_end: int = 300, lr_wks: int = 5,
@@ -1156,19 +1156,19 @@ def apply_preset(lt_name: str, demand_kind: str, *,
     """
     Mutates session_state to apply one of the 18 quick scenarios.
 
-    Two preset families with deliberately different defaults:
+    Two preset families with different stock sizing + distribution:
 
-      Operational (Flat / Growth / Drop)
+      Permanent (Flat / Growth / Drop)
         - Stock auto-sized to coverage × BASE_FORECAST
         - Distributions: STOCK_DIST_OPERATIONAL (closer to v1)
-        - Kickstart OFF — preserves the gating that makes Drop efficient
-          (initial WIP only flows after the first order is placed).
 
-      Seasonal
+      Seasonal (avg 30 / 100 / 300, Steep curve)
         - Stock fixed at PRESET_INIT_STOCK_SEASONAL (2600)
         - Distributions: STOCK_DIST_SEASONAL (more RM/Semi pre-positioned)
-        - Kickstart ON — fixes the "well-sized stock + planner never orders"
-          edge case where initial RM/Semi would otherwise sit forever.
+
+    Kickstart is OFF for both families: initial WIP stays put until the
+    planner places the first order. Over-positioned RM/Semi that never
+    gets used is a deliberate teaching outcome, not a bug.
 
     Parameters
     ----------
@@ -1187,12 +1187,16 @@ def apply_preset(lt_name: str, demand_kind: str, *,
     if is_seasonal:
         dist = STOCK_DIST_SEASONAL[lt_name]
         st.session_state["total_stock"] = PRESET_INIT_STOCK_SEASONAL
-        st.session_state["kickstart"]   = True
     else:
         dist = STOCK_DIST_OPERATIONAL[lt_name]
         coverage = lt["mat_lt"] + lt["semi_lt"] + lt["fp_lt"] + lt["dist_lt"] + lt["order_freq"]
         st.session_state["total_stock"] = min(BASE_FORECAST * coverage, 10000)
-        st.session_state["kickstart"]   = False
+
+    # Kickstart OFF for all presets: initial WIP only moves when the planner
+    # places an order. If pre-positioned RM/Semi never gets used because the
+    # planner never orders, that's a real teaching point about over-investing
+    # upstream — not something to paper over with a force-process.
+    st.session_state["kickstart"]    = False
 
     st.session_state["store_pct"]    = dist["store_pct"]
     st.session_state["wh_pct"]       = dist["wh_pct"]
@@ -1400,8 +1404,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### \U0001f3af Quick Scenarios — Permanent")
     st.caption("3 LT × 3 Demand · stock auto-sized to coverage·100 · "
-               "Agile 60/20/10/10, Medium 80/20/0/0, Push 100/0/0/0 · "
-               "A=60%, smart ON, kickstart OFF (initial WIP gated by first order)")
+               "Agile 60/20/10/10, Medium 80/20/0/0, Push 100/0/0/0 · A=60%, smart ON")
 
     h1, h2, h3, h4 = st.columns([1.2, 1, 1, 1])
     with h2: st.markdown("**Flat 100**")
@@ -1430,7 +1433,7 @@ with st.sidebar:
     st.markdown("### \U0001f30a Quick Scenarios — Seasonal (Steep)")
     st.caption("3 LT × 3 averages (30 / 100 / 300) · Steep gamma curve · "
                "all use 2600 init stock · Agile 40/20/10/30, Medium 70/20/10/0, Push 100/0/0/0 · "
-               "A=60%, smart ON, kickstart ON (unsticks initial RM/Semi when planner doesn't order)")
+               "A=60%, smart ON")
 
     sh1, sh2, sh3, sh4 = st.columns([1.2, 1, 1, 1])
     with sh2: st.markdown("**Avg 30**")
@@ -1465,10 +1468,10 @@ with st.sidebar:
                         args=("Push", "Seasonal"), kwargs={"seas_avg": 300, "seas_sub": "Steep"})
 
     st.caption(
-        "**Permanent** presets gate initial WIP behind the first order — "
-        "Drop scenarios stay efficient because the factory waits to ramp.\n\n"
-        "**Seasonal** presets enable kickstart so well-sized initial stock "
-        "doesn't get permanently stuck when the planner sees no need to order."
+        "All presets gate initial WIP behind the first supplier order. "
+        "If the planner never orders (well-sized stock), pre-positioned "
+        "RM/Semi stays unused — a deliberate teaching point about "
+        "over-investing upstream."
     )
 
 
