@@ -521,6 +521,8 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
         states.append(s)
 
     # Debug: end-of-run unit conservation
+    # Backlog (pb) is phantom — outstanding orders the supplier hasn't yet shipped,
+    # so those units don't physically exist in our system. Don't count them here.
     if debug:
         init_units = init_store + init_cw + init_semi + init_rawmat
         total_shipped = sum(s['supplier_shipped'] for s in states)
@@ -529,7 +531,7 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
         end_pipe_u = (sum(mat_pipe) + sum(semi_pipe) + sum(fp_pipe)
                       + sum(dist_pipe_a) + sum(dist_pipe_b))
         lhs = init_units + total_shipped
-        rhs = total_sales + end_stock_u + end_pipe_u + pb
+        rhs = total_sales + end_stock_u + end_pipe_u
         assert abs(lhs - rhs) < 2.0, f"Unit conservation failed: {lhs:.1f} != {rhs:.1f}"
 
     return states
@@ -710,17 +712,18 @@ def reconciliation_report(states, kpis, params):
     end_pipe_u = (sum(last.get('mat_pipe', []))    + sum(last.get('semi_pipe', []))
                 + sum(last.get('fp_pipe', []))     + sum(last.get('dist_pipe_a', []))
                 + sum(last.get('dist_pipe_b', [])))
-    backlog = last.get('backlog', 0)
 
     checks = []
 
     # Check 1: physical unit conservation
+    # Backlog is excluded on purpose — it represents orders not yet materialized
+    # (phantom units the supplier still owes us).
     lhs = init_units + total_shipped
-    rhs = total_sales + end_stock_u + end_pipe_u + backlog
+    rhs = total_sales + end_stock_u + end_pipe_u
     checks.append((
         "Physical units conserved",
         abs(lhs - rhs) < 2.0,
-        f"init+shipped ({lhs:.0f}) ≈ sales+stock+pipe+backlog ({rhs:.0f}), Δ={lhs-rhs:+.1f}",
+        f"init+shipped ({lhs:.0f}) ≈ sales+stock+pipe ({rhs:.0f}), Δ={lhs-rhs:+.1f}",
     ))
 
     # Check 2: value conservation (in = out + remaining)
@@ -1425,4 +1428,366 @@ with st.sidebar:
 # ════════════════════════════════════════════════════════════════
 # MAIN PAGE UI
 # ════════════════════════════════════════════════════════════════
-# (filled in next chunk)
+
+import altair as alt
+
+# --- Build params dict & run simulation ---
+params = {
+    'weeks': weeks,
+    'init_store': init_store, 'init_cw': init_cw,
+    'init_semi': init_semi, 'init_rawmat': init_rawmat,
+    'order_freq': order_freq,
+    'mat_lt': mat_lt, 'semi_lt': semi_lt, 'fp_lt': fp_lt, 'dist_lt': dist_lt,
+    'cap_start': cap_start, 'cap_ramp': cap_ramp,
+    'base_forecast': BASE_FORECAST,
+    'price': price, 'var_cost': var_cost, 'fixed_pct': fixed_pct,
+    'store_a_pct': store_a_pct, 'smart_distrib': smart_distrib,
+    'kickstart': kickstart, 'debug': debug_mode,
+    'custom_demand': tuple(custom_demand),
+}
+
+states = run_simulation(**params)
+final_kpis = compute_kpis(states[1:], price, var_cost, fixed_pct, BASE_FORECAST, weeks,
+                          init_store, init_cw, init_semi, init_rawmat, debug=debug_mode)
+
+# --- Global styles ---
+st.markdown("""
+<style>
+    .stApp { background-color: #f4f6f9; }
+    section[data-testid="stSidebar"] { background: linear-gradient(180deg, #eaeff5, #f0f3f8); }
+    h1 { color: #1a2a40 !important; }
+    h2, h3, h4 { color: #2c3e56 !important; }
+    .kpi-card {
+        background: linear-gradient(135deg, #ffffff, #f7f9fc);
+        border-radius: 10px; padding: 14px 8px;
+        border: 1px solid #dde3ed; text-align: center;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.05);
+    }
+    .kpi-value { font-size: 21px; font-weight: 800; margin-top: 2px; }
+    .kpi-label { font-size: 8px; color: #7a8a9e; text-transform: uppercase;
+        letter-spacing: 1.2px; font-weight: 700; }
+</style>
+""", unsafe_allow_html=True)
+
+# --- Header ---
+st.markdown("# \U0001f3ed Supply Chain Agility Simulator")
+distrib_mode = "Smart" if smart_distrib else "Push 50/50"
+kick_tag = " | Kickstart ON" if kickstart else ""
+st.markdown(
+    f"*LT = **{phys_lt}**wk | Coverage = **{coverage}**wk | "
+    f"Demand: **{demand_description}** | A: **{store_a_pct}%** / B: **{100-store_a_pct}%** | "
+    f"{distrib_mode}{kick_tag}*"
+)
+
+# --- Week navigation ---
+# Guard against stale week_num after a preset or sim-length change
+if st.session_state.week_num > weeks:
+    st.session_state.week_num = weeks
+if st.session_state.week_num < 0:
+    st.session_state.week_num = 0
+
+
+def _nav_w0():    st.session_state.week_num = 0
+def _nav_minus(): st.session_state.week_num = max(0, st.session_state.week_num - 1)
+def _nav_plus():  st.session_state.week_num = min(weeks, st.session_state.week_num + 1)
+def _nav_end():   st.session_state.week_num = weeks
+
+
+b1, b2, b3, b4, info = st.columns([1, 1, 1, 1, 2])
+with b1: st.button("⏮ W0",      use_container_width=True, disabled=st.session_state.week_num == 0,      on_click=_nav_w0)
+with b2: st.button("◀ −1",      use_container_width=True, disabled=st.session_state.week_num <= 0,      on_click=_nav_minus)
+with b3: st.button("+1 ▶",      use_container_width=True, disabled=st.session_state.week_num >= weeks,  on_click=_nav_plus)
+with b4: st.button(f"W{weeks} ⏭", use_container_width=True, disabled=st.session_state.week_num >= weeks, on_click=_nav_end)
+with info:
+    pct = st.session_state.week_num / max(weeks, 1)
+    bar_w = int(pct * 100)
+    st.markdown(
+        f"<div style='padding:8px 0;'>"
+        f"<div style='font-size:24px;font-weight:800;color:#1a2a40;text-align:center;'>"
+        f"Week {st.session_state.week_num} <span style='font-size:13px;color:#7a8a9e;'>/ {weeks}</span></div>"
+        f"<div style='background:#e0e4ea;border-radius:4px;height:6px;margin-top:4px;'>"
+        f"<div style='background:#4a90d9;height:6px;border-radius:4px;width:{bar_w}%;'></div></div></div>",
+        unsafe_allow_html=True,
+    )
+
+week = st.session_state.week_num
+state = states[week]
+cum = cumulative_kpis(states[1:], week, price, var_cost, fixed_pct, BASE_FORECAST, weeks,
+                      init_store, init_cw, init_semi, init_rawmat)
+
+
+# --- 7 KPI cards (operational, driven by cumulative-up-to-current-week) ---
+def _kpi_card(label, value, color="#1a2a40"):
+    return f'<div class="kpi-card"><div class="kpi-label">{label}</div><div class="kpi-value" style="color:{color};">{value}</div></div>'
+
+
+k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
+with k1:
+    svc = cum['svc_level']
+    c = "#c0392b" if svc < 0.6 else ("#d4850a" if svc < 0.85 else "#1a8a4a")
+    st.markdown(_kpi_card("Service Level", f"{svc*100:.1f}%", c), unsafe_allow_html=True)
+with k2:
+    st.markdown(_kpi_card("Cumul. Sales",   f"{round(cum['sales'], -1):,.0f}", "#2c5f8a"), unsafe_allow_html=True)
+with k3:
+    st.markdown(_kpi_card("Missed Total",   f"{round(cum['missed'], -1):,.0f}", "#c0392b"), unsafe_allow_html=True)
+with k4:
+    st.markdown(_kpi_card("Missed A",       f"{round(cum['missed_a'], -1):,.0f}", "#c0392b"), unsafe_allow_html=True)
+with k5:
+    st.markdown(_kpi_card("Missed B",       f"{round(cum['missed_b'], -1):,.0f}", "#7b2d8e"), unsafe_allow_html=True)
+with k6:
+    sc_clr = "#c0392b" if cum['stockout_wks'] > 0 else "#1a8a4a"
+    st.markdown(_kpi_card("Stockout Wks",   f"{cum['stockout_wks']}/{week}", sc_clr), unsafe_allow_html=True)
+with k7:
+    uf = cum['useful_pct']
+    uc = "#1a8a4a" if uf > 80 else ("#d4850a" if uf > 50 else "#c0392b")
+    st.markdown(_kpi_card("Useful Prod.",   f"{uf:.0f}%", uc), unsafe_allow_html=True)
+
+
+# --- SC flow diagram (exactly one st.components.v1.html call) ---
+st.markdown("")
+_max_stage = max(params['mat_lt'], params['semi_lt'], params['fp_lt'], params['dist_lt'])
+_rows_needed = math.ceil(_max_stage / MAX_PER_ROW)
+_stage_h  = _rows_needed * 145
+_stores_h = 2 * 118 + 10 + 28   # 2 store cards + gap + header; sized so LOST badge doesn't clip
+_content_h = max(_stage_h, _stores_h)
+_viz_h = 48 + 16 + _content_h + 28 + 32   # info bar + pad + content + phys flow + comment
+st.components.v1.html(make_sc_html(state, params), height=_viz_h, scrolling=False)
+
+
+# --- Charts (collapsed by default) ---
+with st.expander("\U0001f4c8 Charts: Demand, Fulfillment, Stocks", expanded=False):
+    dem_chart_data = pd.DataFrame({
+        "Week": list(range(1, weeks + 1)),
+        "Demand": [states[i]["demand"] for i in range(1, weeks + 1)],
+        "Sales":  [states[i]["sales"]  for i in range(1, weeks + 1)],
+        "Missed": [states[i]["missed"] for i in range(1, weeks + 1)],
+    })
+    y_max = max(dem_chart_data["Demand"].max(), 1) * 1.15
+    y_scale = alt.Scale(domain=[0, y_max])
+
+    bar_data = dem_chart_data.melt("Week", ["Sales", "Missed"], var_name="Type", value_name="Units")
+    stacked_bars = alt.Chart(bar_data).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
+        x=alt.X("Week:O", title="Week"),
+        y=alt.Y("Units:Q", title="Units/week", scale=y_scale, stack=True),
+        color=alt.Color("Type:N",
+            scale=alt.Scale(domain=["Sales", "Missed"], range=["#1a8a4a", "#c0392b"]),
+            legend=alt.Legend(orient="top", title=None)),
+        order=alt.Order("Type:N", sort="descending"),
+    )
+    demand_line = alt.Chart(dem_chart_data).mark_line(color="#4a90d9", strokeWidth=3, strokeDash=[6, 3]).encode(
+        x=alt.X("Week:O"), y=alt.Y("Demand:Q", scale=y_scale))
+    demand_dots = alt.Chart(dem_chart_data).mark_circle(color="#4a90d9", size=40).encode(
+        x="Week:O", y=alt.Y("Demand:Q", scale=y_scale))
+    rule_dc = alt.Chart(pd.DataFrame({"Week": [week]})).mark_rule(
+        color="#d4850a", strokeWidth=2, strokeDash=[4, 2]).encode(x="Week:O")
+
+    st.markdown("#### Demand vs Sales vs Missed")
+    st.altair_chart((stacked_bars + demand_line + demand_dots + rule_dc).properties(height=300),
+                    use_container_width=True)
+
+    ch1, ch2 = st.columns(2)
+    with ch1:
+        st.markdown("#### Demand vs Fulfillment (per store)")
+        rows = []
+        for s in states[1:]:
+            rows.append({'Week': s['week'], 'Group': 'Fill A', 'Component': 'Sales A', 'Value': s['sales_a']})
+            rows.append({'Week': s['week'], 'Group': 'Fill A', 'Component': 'Lost A',  'Value': s['missed_a']})
+            rows.append({'Week': s['week'], 'Group': 'Fill B', 'Component': 'Sales B', 'Value': s['sales_b']})
+            rows.append({'Week': s['week'], 'Group': 'Fill B', 'Component': 'Lost B',  'Value': s['missed_b']})
+        df_bars = pd.DataFrame(rows)
+        bars = alt.Chart(df_bars).mark_bar(cornerRadiusTopLeft=2, cornerRadiusTopRight=2).encode(
+            x=alt.X('Week:O'), y=alt.Y('Value:Q', title='Units', stack=True),
+            color=alt.Color('Component:N',
+                scale=alt.Scale(domain=['Sales A', 'Lost A', 'Sales B', 'Lost B'],
+                                range=['#2c5f8a', '#c0392b', '#6a3d9a', '#e74c8c']),
+                legend=alt.Legend(orient='top', title=None, columns=2)),
+            xOffset='Group:N',
+        ).properties(height=260)
+        rule = alt.Chart(pd.DataFrame({'Week': [week]})).mark_rule(
+            color='#d4850a', strokeWidth=2, strokeDash=[4, 2]).encode(x='Week:O')
+        st.altair_chart(bars + rule, use_container_width=True)
+
+    with ch2:
+        st.markdown("#### Store Stocks & Orders")
+        stock_data = pd.DataFrame({
+            'Week': [s['week'] for s in states],
+            'Store A': [s['store_a'] for s in states],
+            'Store B': [s['store_b'] for s in states],
+            'Order':   [s['order']   for s in states],
+        })
+        melted = stock_data.melt('Week', ['Store A', 'Store B'], var_name='Store', value_name='Stock')
+        lines = alt.Chart(melted).mark_area(opacity=0.25).encode(
+            x=alt.X('Week:O'), y=alt.Y('Stock:Q', title='Units', stack=False),
+            color=alt.Color('Store:N',
+                scale=alt.Scale(domain=['Store A', 'Store B'], range=['#2c5f8a', '#6a3d9a']),
+                legend=alt.Legend(orient='top', title=None)),
+        ).properties(height=260)
+        order_bars = alt.Chart(stock_data[stock_data['Order'] > 0]).mark_bar(
+            color='#1a8a4a', opacity=0.4, cornerRadiusTopLeft=2, cornerRadiusTopRight=2
+        ).encode(x='Week:O', y='Order:Q')
+        rule2 = alt.Chart(pd.DataFrame({'Week': [week]})).mark_rule(
+            color='#d4850a', strokeWidth=2, strokeDash=[4, 2]).encode(x='Week:O')
+        st.altair_chart(lines + order_bars + rule2, use_container_width=True)
+
+
+# --- P&L Summary (collapsed by default) ---
+with st.expander("\U0001f4cb P&L Summary (end of simulation)", expanded=False):
+    fk = final_kpis
+    st.markdown("#### Profit & Loss Statement")
+    # Detail text uses ACTUAL units costed (= cost_total / unit_increment)
+    units_rm   = fk['cost_mat_total']  / (var_cost * VALOR_RAW_MAT) if var_cost > 0 else 0
+    units_semi = fk['cost_semi_total'] / (var_cost * (VALOR_SEMI - VALOR_RAW_MAT)) if var_cost > 0 else 0
+    units_fp   = fk['cost_fp_total']   / (var_cost * (VALOR_FINISHED - VALOR_SEMI)) if var_cost > 0 else 0
+    pl_data = {
+        "Line": [
+            "\U0001f4b0 Revenue",
+            "",
+            "− Initial Stock (pre-invested)",
+            "− Purchasing (RM @50%)",
+            "− Semi Processing (+25%)",
+            "− Finishing (+25%)",
+            "= Total Variable Cost",
+            "",
+            "= Gross Margin",
+            "− Fixed Costs",
+            "",
+            "= **Net Margin**",
+            "",
+            "\U0001f4e6 Leftover Stock + WIP (asset)",
+        ],
+        "Amount (€)": [
+            f"{fk['revenue']:,.0f}",
+            "",
+            f"-{fk['init_stock_value']:,.0f}",
+            f"-{fk['cost_mat_total']:,.0f}",
+            f"-{fk['cost_semi_total']:,.0f}",
+            f"-{fk['cost_fp_total']:,.0f}",
+            f"-{fk['var_cost']:,.0f}",
+            "",
+            f"{fk['gm']:,.0f}",
+            f"-{fk['fixed']:,.0f}",
+            "",
+            f"{fk['margin']:,.0f}",
+            "",
+            f"€{fk['leftover_value']:,.0f}",
+        ],
+        "Detail": [
+            f"{fk['total_sales']:,.0f} pcs × €{price}",
+            "",
+            "Store/WH @100% + Semi @75% + RM @50% (pre-positioned)",
+            f"{units_rm:.0f} pcs × €{var_cost * VALOR_RAW_MAT:.0f} (booked on entry to Material)",
+            f"{units_semi:.0f} pcs × €{var_cost * (VALOR_SEMI - VALOR_RAW_MAT):.0f} (booked on entry to Semi)",
+            f"{units_fp:.0f} pcs × €{var_cost * (VALOR_FINISHED - VALOR_SEMI):.0f} (booked on entry to FP)",
+            "Init stock + production costs",
+            "",
+            "Revenue − Variable Costs",
+            f"{fixed_pct*100:.0f}% of simulation forecast revenue",
+            "",
+            f"{fk['margin_pct']*100:.1f}% of revenue",
+            "",
+            f"{fk['end_stock_units'] + fk['end_pipe_units']:.0f} pcs (store + WIP + pipe), valorized by stage",
+        ],
+    }
+    st.table(pd.DataFrame(pl_data).set_index("Line"))
+
+    st.markdown("---")
+    st.markdown("#### Production Efficiency")
+    u1, u2, u3 = st.columns(3)
+    with u1: st.metric("Service Level",            f"{fk['svc_level']*100:.1f}%")
+    with u2: st.metric("✅ Sold (Useful)",          f"{fk['useful_units']:,.0f} pcs ({fk['useful_pct']:.0f}%)")
+    with u3: st.metric("❌ Remaining WIP + stock",  f"{fk['useless_units']:,.0f} pcs ({fk['useless_pct']:.0f}%)")
+
+
+# --- Debug expander (only when Debug mode is ON) ---
+if debug_mode:
+    with st.expander("🧪 Debug — reconciliation diagnostics", expanded=True):
+        checks = reconciliation_report(states, final_kpis, params)
+        rows = []
+        for label, ok, detail in checks:
+            rows.append({
+                "Check": label,
+                "Status": "✓ pass" if ok else "✗ FAIL",
+                "Detail": detail,
+            })
+        df_checks = pd.DataFrame(rows)
+        st.dataframe(df_checks, use_container_width=True, hide_index=True)
+        if any(not ok for _, ok, _ in checks):
+            st.error("One or more reconciliation checks failed — see details above.")
+        else:
+            st.success("All reconciliation checks passed.")
+
+
+# --- Week-by-week data table (collapsed by default) ---
+with st.expander("\U0001f4ca Detailed Week-by-Week Data", expanded=False):
+    table_data = []
+    for s in states:
+        wk_rev    = s['sales'] * price
+        wk_vc     = s.get('cost_mat', 0) + s.get('cost_semi', 0) + s.get('cost_fp', 0)
+        wk_margin = wk_rev - wk_vc
+        table_data.append({
+            'Week':     s['week'],
+            'Demand':   s['demand'],   'Dem A':  s['demand_a'], 'Dem B':  s['demand_b'],
+            'Sales':    s['sales'],    'Sales A': s['sales_a'], 'Sales B': s['sales_b'],
+            'Missed':   s['missed'],   'Miss A': s['missed_a'], 'Miss B': s['missed_b'],
+            'Stk A':    s['store_a'],  'Stk B':  s['store_b'],
+            'Alloc A':  s['alloc_a'],  'Alloc B': s['alloc_b'],
+            'CW Wait':  s.get('cw_stock', 0),   'CW Pipe':  s.get('cw_shipped', 0),
+            'FP Pipe':  round(sum(s.get('fp_pipe', [])), 1),
+            'Semi Wait': s.get('semi_stock', 0), 'Semi Pipe': round(sum(s.get('semi_pipe', [])), 1),
+            'RM Wait':  s.get('raw_mat_stock', 0), 'Mat Pipe': round(sum(s.get('mat_pipe', [])), 1),
+            'WIP':      s.get('wip_total', 0),
+            'Order':    s['order'],    'Pending': s['pending'],
+            'Sup Cap':  s.get('supplier_cap', 0),
+            'Revenue':  round(wk_rev),
+            'Cost RM':   round(s.get('cost_mat', 0)),
+            'Cost Semi': round(s.get('cost_semi', 0)),
+            'Cost FP':   round(s.get('cost_fp', 0)),
+            'Tot VC':   round(wk_vc),
+            'Margin':   round(wk_margin),
+        })
+    st.dataframe(pd.DataFrame(table_data), use_container_width=True, height=500)
+    st.caption("**CW Wait** = stock sitting in CW buffer. **CW Pipe** = units shipped from CW toward stores this week. "
+               "**Costs** are booked when units ENTER each stage (RM 50%, Semi +25%, FP +25%).")
+
+
+# --- Save scenario + comparison ---
+with st.expander("\U0001f4be Save Scenario for Comparison", expanded=False):
+    now_str = datetime.now().strftime("%H:%M:%S")
+    default_name = f"LT{phys_lt}_f{order_freq}_{demand_description}_{now_str}"
+    scenario_name = st.text_input("Scenario Name", default_name)
+    if st.button("Save Current Scenario"):
+        st.session_state.setdefault('saved_scenarios', {})
+        st.session_state.saved_scenarios[scenario_name] = {
+            'params':      params.copy(),
+            'kpis':        final_kpis.copy(),
+            'demand_desc': demand_description,
+        }
+        st.success(f"Saved '{scenario_name}'!")
+
+    if st.session_state.get('saved_scenarios'):
+        st.markdown("### Comparison")
+        saved_list = list(st.session_state.saved_scenarios.items())
+        first_margin = saved_list[0][1]['kpis']['margin']
+        comp = []
+        for i, (n, d) in enumerate(saved_list):
+            k = d['kpis']; p = d['params']
+            delta = k['margin'] - first_margin
+            delta_str = f"€{delta:+,.0f}" if i > 0 else "Baseline"
+            comp.append({
+                'Scenario': n,
+                'Demand':   d.get('demand_desc', ''),
+                'Svc%':     f"{k['svc_level']*100:.1f}%",
+                'Sales':    f"{round(k['total_sales'], -1):,.0f}",
+                'Missed':   f"{round(k['total_missed'], -1):,.0f}",
+                'Revenue':  f"€{k['revenue']:,.0f}",
+                'Margin':   f"€{k['margin']:,.0f}",
+                'Δ vs Base': delta_str,
+                'Useful%':  f"{k['useful_pct']:.0f}%",
+                'Stock':    p['init_store'] + p['init_cw'] + p['init_semi'] + p['init_rawmat'],
+                'Freq':     f"{p['order_freq']}wk",
+                'Tot LT':   p['mat_lt'] + p['semi_lt'] + p['fp_lt'] + p['dist_lt'],
+            })
+        st.dataframe(pd.DataFrame(comp), use_container_width=True)
+        if st.button("Clear All"):
+            st.session_state.saved_scenarios = {}
+            st.rerun()
