@@ -1115,13 +1115,311 @@ def make_sc_html(state: dict, params: dict) -> str:
 # ════════════════════════════════════════════════════════════════
 # PRESET APPLICATION
 # ════════════════════════════════════════════════════════════════
-# (filled in next chunk)
+#
+# Two preset families (18 buttons total):
+#   1. Operational grid: 3 LT × 3 demand shapes (Flat / Growth / Drop)
+#   2. Seasonal grid:    3 LT × 3 seasonal averages (30 / 100 / 300, Steep curve)
+#
+# Common to all 18 presets:
+#   - Total init stock = PRESET_INIT_STOCK (2600), weeks = PRESET_WEEKS (26)
+#   - Store A demand share = 60%, smart distribution ON
+#   - Stock distribution depends on the LT profile (see STOCK_DIST)
+
+def apply_preset(lt_name: str, demand_kind: str, *,
+                 lr_end: int = 300, lr_wks: int = 5,
+                 ld_end: int = 30,  ld_wks: int = 1,
+                 seas_avg: int = 100, seas_sub: str = "Steep") -> None:
+    """
+    Mutates session_state to apply one of the 18 quick scenarios.
+
+    Parameters
+    ----------
+    lt_name : "Agile" | "Medium" | "Push"
+    demand_kind : "Flat" | "Growth" | "Drop" | "Seasonal"
+    """
+    lt = LT_PROFILES[lt_name]
+    st.session_state["mat_lt"]       = lt["mat_lt"]
+    st.session_state["semi_lt"]      = lt["semi_lt"]
+    st.session_state["fp_lt"]        = lt["fp_lt"]
+    st.session_state["dist_lt"]      = lt["dist_lt"]
+    st.session_state["order_freq"]   = lt["order_freq"]
+
+    dist = STOCK_DIST[lt_name]
+    st.session_state["store_pct"]    = dist["store_pct"]
+    st.session_state["wh_pct"]       = dist["wh_pct"]
+    st.session_state["semi_pct"]     = dist["semi_pct"]
+
+    st.session_state["total_stock"]  = PRESET_INIT_STOCK
+    st.session_state["store_a_pct"]  = 60
+    st.session_state["smart_distrib"] = True
+    st.session_state["kickstart"]    = True
+
+    if demand_kind == "Flat":
+        st.session_state["demand_shape"] = DEMAND_SHAPES[0]
+    elif demand_kind == "Growth":
+        st.session_state["demand_shape"] = DEMAND_SHAPES[1]
+        st.session_state["lr_end"] = lr_end
+        st.session_state["lr_wks"] = lr_wks
+    elif demand_kind == "Drop":
+        st.session_state["demand_shape"] = DEMAND_SHAPES[2]
+        st.session_state["ld_end"] = ld_end
+        st.session_state["ld_wks"] = ld_wks
+    elif demand_kind == "Seasonal":
+        st.session_state["demand_shape"] = DEMAND_SHAPES[3]
+        st.session_state["seas_sub"] = seas_sub
+        st.session_state["seas_avg"] = seas_avg
+
+    # Reset navigation so user sees W0 of the new scenario
+    st.session_state["week_num"] = 0
 
 
 # ════════════════════════════════════════════════════════════════
 # SIDEBAR UI
 # ════════════════════════════════════════════════════════════════
-# (filled in next chunk)
+
+with st.sidebar:
+    st.markdown("## ⚙️ Supply Chain Setup")
+    weeks = st.select_slider("Simulation Length (weeks)", options=[13, 26, 39, 52], value=26)
+
+    # --- Lead times ---
+    st.markdown("### \U0001f517 Lead Times (weeks)")
+    c1, c2 = st.columns(2)
+    with c1:
+        mat_lt  = st.number_input("Material",  min_value=1, max_value=24, step=1, key="mat_lt")
+        semi_lt = st.number_input("Semi-Fin",  min_value=1, max_value=12, step=1, key="semi_lt")
+    with c2:
+        fp_lt   = st.number_input("Finishing", min_value=1, max_value=12, step=1, key="fp_lt")
+        dist_lt = st.number_input("Distribution", min_value=1, max_value=12, step=1, key="dist_lt")
+    phys_lt = mat_lt + semi_lt + fp_lt + dist_lt
+    st.caption(f"Physical LT: **{phys_lt}** weeks")
+
+    # --- Planning ---
+    st.markdown("### \U0001f4cb Planning")
+    order_freq = st.slider("Order / Replenishment Frequency (weeks)",
+                           min_value=1, max_value=4, step=1, key="order_freq")
+    coverage = phys_lt + order_freq
+    st.caption(f"Base forecast: **{BASE_FORECAST}** pcs/wk (fixed)")
+    st.caption(f"Coverage target: **{coverage}** weeks (LT {phys_lt} + freq {order_freq})")
+
+    # --- Initial stock with smart recommendation ---
+    st.markdown("### \U0001f4e6 Initial Stock")
+    _ds = st.session_state.get("demand_shape", DEMAND_SHAPES[0])
+    rec_units, rec_detail = recommend_initial_stock(
+        _ds, weeks, coverage,
+        base=BASE_FORECAST,
+        lr_end=st.session_state.get("lr_end", 300),
+        lr_wks=st.session_state.get("lr_wks", 5),
+        ld_end=st.session_state.get("ld_end", 30),
+        ld_wks=st.session_state.get("ld_wks", 1),
+        seas_sub=st.session_state.get("seas_sub", "Steep"),
+        seas_avg=st.session_state.get("seas_avg", 100),
+    )
+    st.markdown(
+        f'<div style="color:#8a96a6;font-size:12px;font-style:italic;margin-bottom:8px;">'
+        f'[Recommended: <b>{rec_units:,.0f}</b> pcs = {rec_detail}] '
+        f'<span style="color:#a8b4c4;">— based on demand profile "{_ds}"</span></div>',
+        unsafe_allow_html=True,
+    )
+    total_stock = st.slider("Total Initial Stock (pcs)", min_value=0, max_value=10000, step=50, key="total_stock")
+
+    st.caption("Distribution (% of total):")
+    # Guard against stale percentages summing > 100 after a preset switch
+    _sp  = st.session_state.get("store_pct", 40)
+    _wp  = st.session_state.get("wh_pct", 20)
+    _sep = st.session_state.get("semi_pct", 10)
+    if _wp > 100 - _sp:
+        st.session_state["wh_pct"] = max(0, 100 - _sp)
+    if _sep > 100 - _sp - st.session_state.get("wh_pct", 0):
+        st.session_state["semi_pct"] = max(0, 100 - _sp - st.session_state.get("wh_pct", 0))
+
+    sc1, sc2, sc3 = st.columns(3)
+    with sc1:
+        store_pct = st.number_input("Store %", min_value=0, max_value=100, step=5, key="store_pct")
+    with sc2:
+        wh_max = max(0, 100 - store_pct)
+        warehouse_pct = st.number_input("Warehouse %", min_value=0, max_value=wh_max, step=5, key="wh_pct")
+    with sc3:
+        semi_max = max(0, 100 - store_pct - warehouse_pct)
+        semi_pct = st.number_input("Semi-Fin %", min_value=0, max_value=semi_max, step=5, key="semi_pct")
+    rawmat_pct = 100 - store_pct - warehouse_pct - semi_pct
+
+    init_store  = int(round(total_stock * store_pct / 100))
+    init_cw     = int(round(total_stock * warehouse_pct / 100))
+    init_semi   = int(round(total_stock * semi_pct / 100))
+    init_rawmat = total_stock - init_store - init_cw - init_semi
+
+    st.markdown(
+        f'<div style="background:#f0f2f5;border-radius:8px;padding:8px 12px;font-size:13px;line-height:1.8;">'
+        f'<b>Store:</b> {init_store} ({store_pct}%) @ 100% <i>(always 50/50 initial)</i> | '
+        f'<b>WH:</b> {init_cw} ({warehouse_pct}%) @ 100% | '
+        f'<b>Semi:</b> {init_semi} ({semi_pct}%) @ 75% | '
+        f'<b>RM:</b> {init_rawmat} ({rawmat_pct}%) @ 50%</div>',
+        unsafe_allow_html=True,
+    )
+
+    # --- Store demand split ---
+    st.markdown("### \U0001f3ea Store Demand Split")
+    store_a_pct = st.slider("Store A demand (%)", 0, 100, step=5, key="store_a_pct")
+    smart_distrib = st.toggle("Smart Distribution (need-based)", key="smart_distrib")
+    if smart_distrib:
+        st.caption(f"A: **{store_a_pct}%** B: **{100-store_a_pct}%** — Stores start 50/50, CW rebalances at first planning review")
+    else:
+        st.caption(f"A: **{store_a_pct}%** B: **{100-store_a_pct}%** — Push 50/50 always")
+
+    # --- Demand profile ---
+    st.markdown("### \U0001f4c8 Demand Profile")
+    preset_shape = st.selectbox("Demand shape", DEMAND_SHAPES, key="demand_shape")
+    bf = BASE_FORECAST
+    demand_description = ""
+
+    if "Flat" in preset_shape:
+        init_demand = build_demand_curve(preset_shape, weeks, base=bf)
+        demand_description = f"Flat {bf}/wk for {weeks} wks"
+
+    elif "ramp" in preset_shape.lower():
+        end_dem = st.slider("Target demand (pcs/wk)", min_value=bf, max_value=1000, step=10, key="lr_end")
+        ramp_wks = st.slider("Ramp duration (weeks)", min_value=1, max_value=weeks, step=1, key="lr_wks")
+        init_demand = build_demand_curve(preset_shape, weeks, base=bf, lr_end=end_dem, lr_wks=ramp_wks)
+        demand_description = f"Ramp {bf}→{end_dem} in {ramp_wks}wk"
+
+    elif "drop" in preset_shape.lower():
+        drop_dem = st.slider("Floor demand (pcs/wk)", min_value=0, max_value=bf, step=10, key="ld_end")
+        drop_wks = st.slider("Drop duration (weeks)", min_value=1, max_value=weeks, step=1, key="ld_wks")
+        init_demand = build_demand_curve(preset_shape, weeks, base=bf, ld_end=drop_dem, ld_wks=drop_wks)
+        demand_description = f"Drop {bf}→{drop_dem} in {drop_wks}wk"
+
+    else:  # Seasonal
+        seas_sub = st.radio("Profile shape", ["Very Steep", "Steep", "~Flat"],
+                            key="seas_sub", horizontal=True)
+        seas_avg = st.slider("Average weekly demand", min_value=0, max_value=1000, step=10, key="seas_avg")
+        init_demand = build_demand_curve(preset_shape, weeks, base=bf,
+                                         seas_sub=seas_sub, seas_avg=seas_avg)
+        demand_description = f"Seasonal {seas_sub} (avg {seas_avg}/wk, total {seas_avg * weeks})"
+
+    st.caption(f"**{demand_description}**")
+
+    # Editable demand table
+    st.caption("✏️ Edit demand per week:")
+    demand_df = pd.DataFrame({
+        "Week": list(range(1, weeks + 1)),
+        "Demand (pcs)": init_demand[1:weeks + 1],
+    })
+    edited = st.data_editor(
+        demand_df,
+        column_config={
+            "Week": st.column_config.NumberColumn(disabled=True, width="small"),
+            "Demand (pcs)": st.column_config.NumberColumn(min_value=0, max_value=9999, step=10, width="medium"),
+        },
+        hide_index=True, use_container_width=True, height=min(300, weeks * 35 + 40),
+        key="demand_editor",
+    )
+    custom_demand = [0] + [int(row["Demand (pcs)"]) for _, row in edited.iterrows()]
+
+    # --- Capacity ---
+    st.markdown("### \U0001f3ed Capacity")
+    cap_start = st.number_input("Starting Capacity (pcs/wk)", 10, 1000, 100)
+    cap_ramp = st.slider("Ramp-up (% vs starting capacity, linear every week)", 0, 50, 20, 5) / 100
+
+    # --- Economics ---
+    st.markdown("### \U0001f4b0 Economics")
+    price = st.number_input("Selling Price (€)", 100, 10000, 1000, 100)
+    var_cost = st.number_input("Variable Cost / Finished Product (€)", 10, 5000, 200, 10)
+    st.markdown(
+        f'<div style="color:#8a96a6;font-size:13px;font-style:italic;">'
+        f'RM: €{var_cost * VALOR_RAW_MAT:.0f} (50%) | '
+        f'Semi: €{var_cost * VALOR_SEMI:.0f} (75%) | '
+        f'Finished: €{var_cost:.0f} (100%)</div>',
+        unsafe_allow_html=True,
+    )
+    fixed_pct = st.slider("Fixed Cost (% of sim period fcst rev)", 0, 100, 45) / 100
+
+    # --- Engine options ---
+    st.markdown("### ⚙️ Engine Options")
+    kickstart = st.toggle(
+        "Kickstart factory at W1 (force-process initial RM/Semi)",
+        key="kickstart",
+        help="If ON and initial RM/Semi > 0, factory becomes active at W1 even before "
+             "the first order is placed. Fixes the 'seasonal ~Flat' edge case where "
+             "initial stock is well-sized and the planner never orders. Drop scenarios "
+             "(no initial RM/Semi) are unaffected.",
+    )
+    debug_mode = st.toggle(
+        "Debug mode (runtime asserts + Debug expander)",
+        key="debug_mode",
+        help="Enables conservation assertions inside the engine and shows a Debug "
+             "expander on the main page with reconciliation diagnostics.",
+    )
+
+    # --- Quick scenarios: operational grid (3 LT × 3 demand) ---
+    st.markdown("---")
+    st.markdown("### \U0001f3af Quick Scenarios — Operational")
+    st.caption("3 Lead Time × 3 Demand · all use 2600 init stock, A=60%, smart ON")
+
+    h1, h2, h3, h4 = st.columns([1.2, 1, 1, 1])
+    with h2: st.markdown("**Flat 100**")
+    with h3: st.markdown("**Growth →300**")
+    with h4: st.markdown("**Drop →30**")
+
+    a1, a2, a3, a4 = st.columns([1.2, 1, 1, 1])
+    with a1: st.markdown("\U0001f7e2 **Agile**\n\n*LT=8, f=1*")
+    with a2: st.button("⚡", key="p_af", use_container_width=True, on_click=apply_preset, args=("Agile", "Flat"))
+    with a3: st.button("⚡", key="p_ag", use_container_width=True, on_click=apply_preset, args=("Agile", "Growth"))
+    with a4: st.button("⚡", key="p_ad", use_container_width=True, on_click=apply_preset, args=("Agile", "Drop"))
+
+    m1, m2, m3, m4 = st.columns([1.2, 1, 1, 1])
+    with m1: st.markdown("\U0001f7e1 **Medium**\n\n*LT=16, f=2*")
+    with m2: st.button("\U0001f536", key="p_mf", use_container_width=True, on_click=apply_preset, args=("Medium", "Flat"))
+    with m3: st.button("\U0001f536", key="p_mg", use_container_width=True, on_click=apply_preset, args=("Medium", "Growth"))
+    with m4: st.button("\U0001f536", key="p_md", use_container_width=True, on_click=apply_preset, args=("Medium", "Drop"))
+
+    p1, p2, p3, p4 = st.columns([1.2, 1, 1, 1])
+    with p1: st.markdown("\U0001f534 **Push**\n\n*LT=24, f=4*")
+    with p2: st.button("\U0001f9f1", key="p_pf", use_container_width=True, on_click=apply_preset, args=("Push", "Flat"))
+    with p3: st.button("\U0001f9f1", key="p_pg", use_container_width=True, on_click=apply_preset, args=("Push", "Growth"))
+    with p4: st.button("\U0001f9f1", key="p_pd", use_container_width=True, on_click=apply_preset, args=("Push", "Drop"))
+
+    # --- Quick scenarios: seasonal grid (3 LT × 3 seasonal averages, all Steep) ---
+    st.markdown("### \U0001f30a Quick Scenarios — Seasonal (Steep)")
+    st.caption("3 Lead Time × 3 averages (30 / 100 / 300) · Steep gamma curve")
+
+    sh1, sh2, sh3, sh4 = st.columns([1.2, 1, 1, 1])
+    with sh2: st.markdown("**Avg 30**")
+    with sh3: st.markdown("**Avg 100**")
+    with sh4: st.markdown("**Avg 300**")
+
+    sa1, sa2, sa3, sa4 = st.columns([1.2, 1, 1, 1])
+    with sa1: st.markdown("\U0001f7e2 **Agile**")
+    with sa2: st.button("\U0001f30a", key="ps_a30",  use_container_width=True, on_click=apply_preset,
+                        args=("Agile", "Seasonal"), kwargs={"seas_avg": 30,  "seas_sub": "Steep"})
+    with sa3: st.button("\U0001f30a", key="ps_a100", use_container_width=True, on_click=apply_preset,
+                        args=("Agile", "Seasonal"), kwargs={"seas_avg": 100, "seas_sub": "Steep"})
+    with sa4: st.button("\U0001f30a", key="ps_a300", use_container_width=True, on_click=apply_preset,
+                        args=("Agile", "Seasonal"), kwargs={"seas_avg": 300, "seas_sub": "Steep"})
+
+    sm1, sm2, sm3, sm4 = st.columns([1.2, 1, 1, 1])
+    with sm1: st.markdown("\U0001f7e1 **Medium**")
+    with sm2: st.button("\U0001f30a", key="ps_m30",  use_container_width=True, on_click=apply_preset,
+                        args=("Medium", "Seasonal"), kwargs={"seas_avg": 30,  "seas_sub": "Steep"})
+    with sm3: st.button("\U0001f30a", key="ps_m100", use_container_width=True, on_click=apply_preset,
+                        args=("Medium", "Seasonal"), kwargs={"seas_avg": 100, "seas_sub": "Steep"})
+    with sm4: st.button("\U0001f30a", key="ps_m300", use_container_width=True, on_click=apply_preset,
+                        args=("Medium", "Seasonal"), kwargs={"seas_avg": 300, "seas_sub": "Steep"})
+
+    sp1, sp2, sp3, sp4 = st.columns([1.2, 1, 1, 1])
+    with sp1: st.markdown("\U0001f534 **Push**")
+    with sp2: st.button("\U0001f30a", key="ps_p30",  use_container_width=True, on_click=apply_preset,
+                        args=("Push", "Seasonal"), kwargs={"seas_avg": 30,  "seas_sub": "Steep"})
+    with sp3: st.button("\U0001f30a", key="ps_p100", use_container_width=True, on_click=apply_preset,
+                        args=("Push", "Seasonal"), kwargs={"seas_avg": 100, "seas_sub": "Steep"})
+    with sp4: st.button("\U0001f30a", key="ps_p300", use_container_width=True, on_click=apply_preset,
+                        args=("Push", "Seasonal"), kwargs={"seas_avg": 300, "seas_sub": "Steep"})
+
+    st.caption(
+        "All presets: **2600 init stock, A=60%, Smart ON, Kickstart ON**\n\n"
+        "\U0001f7e2 Agile: 40/20/10/30 (store/WH/semi/RM) | "
+        "\U0001f7e1 Medium: 70/20/10/0 | "
+        "\U0001f534 Push: 100/0/0/0"
+    )
 
 
 # ════════════════════════════════════════════════════════════════
