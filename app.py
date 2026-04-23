@@ -83,8 +83,16 @@ STOCK_DIST_SEASONAL = {
     "Push":   {"store_pct": 100, "wh_pct": 0, "semi_pct": 0},    # RM = 0
 }
 
-# Seasonal presets always use total init stock = 2600 over 26 weeks
-PRESET_INIT_STOCK_SEASONAL = 2600
+# Seasonal presets size initial stock by sell-through target: longer LT
+# profiles must over-order to hedge demand uncertainty. Agile can run
+# near 100% sell-through; Push can't react, so it needs a larger buffer
+# and accepts that much of the stock won't sell.
+SEASONAL_BASE_STOCK = 2600
+SELL_THROUGH_SEASONAL = {
+    "Agile":  1.00,   # 100% sell-through target → 2600 pcs
+    "Medium": 0.85,   # 15% buffer               → 3059 pcs
+    "Push":   0.60,   # 40% buffer               → 4333 pcs
+}
 PRESET_WEEKS = 26
 
 # Seasonal sub-profile parameters: (peak_position_ratio, shape_k)
@@ -1143,7 +1151,8 @@ def make_sc_html(state: dict, params: dict) -> str:
 #        - Stock auto-sized to coverage × BASE_FORECAST
 #        - Distributions: STOCK_DIST_OPERATIONAL
 #   2. Seasonal grid: 3 LT × 3 seasonal averages (30 / 100 / 300), Steep curve
-#        - Stock fixed at PRESET_INIT_STOCK_SEASONAL (2600)
+#        - Stock = SEASONAL_BASE_STOCK (2600) / sell-through target
+#          Agile 100% → 2600, Medium 85% → 3059, Push 60% → 4333
 #        - Distributions: STOCK_DIST_SEASONAL
 #
 # Common to all 18 presets: A=60%, smart distribution ON, kickstart OFF.
@@ -1163,7 +1172,9 @@ def apply_preset(lt_name: str, demand_kind: str, *,
         - Distributions: STOCK_DIST_OPERATIONAL (closer to v1)
 
       Seasonal (avg 30 / 100 / 300, Steep curve)
-        - Stock fixed at PRESET_INIT_STOCK_SEASONAL (2600)
+        - Stock sized by sell-through target: SEASONAL_BASE_STOCK (2600)
+          divided by the LT profile's sell-through %. Agile=2600, Medium≈3059,
+          Push≈4333 — longer LT hedges with more over-ordering.
         - Distributions: STOCK_DIST_SEASONAL (more RM/Semi pre-positioned)
 
     Kickstart is OFF for both families: initial WIP stays put until the
@@ -1186,7 +1197,8 @@ def apply_preset(lt_name: str, demand_kind: str, *,
 
     if is_seasonal:
         dist = STOCK_DIST_SEASONAL[lt_name]
-        st.session_state["total_stock"] = PRESET_INIT_STOCK_SEASONAL
+        sell_through = SELL_THROUGH_SEASONAL[lt_name]
+        st.session_state["total_stock"] = int(round(SEASONAL_BASE_STOCK / sell_through))
     else:
         dist = STOCK_DIST_OPERATIONAL[lt_name]
         coverage = lt["mat_lt"] + lt["semi_lt"] + lt["fp_lt"] + lt["dist_lt"] + lt["order_freq"]
@@ -1432,7 +1444,9 @@ with st.sidebar:
     # --- Quick scenarios: seasonal grid (3 LT × 3 seasonal averages, all Steep) ---
     st.markdown("### \U0001f30a Quick Scenarios — Seasonal (Steep)")
     st.caption("3 LT × 3 averages (30 / 100 / 300) · Steep gamma curve · "
-               "all use 2600 init stock · Agile 40/20/10/30, Medium 70/20/10/0, Push 100/0/0/0 · "
+               "stock sized by sell-through target: Agile 100% → 2600 pcs, "
+               "Medium 85% → 3059 pcs, Push 60% → 4333 pcs · "
+               "Distributions: Agile 40/20/10/30, Medium 70/20/10/0, Push 100/0/0/0 · "
                "A=60%, smart ON")
 
     sh1, sh2, sh3, sh4 = st.columns([1.2, 1, 1, 1])
