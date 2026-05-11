@@ -530,6 +530,35 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
             od_semi = math.ceil(max(0, tgt_semi - existing_semi))
             od_fp   = math.ceil(max(0, tgt_fp   - existing_fp))
             od_ship = math.ceil(max(0, tgt_ship - existing_ship))
+
+            # Per-store gap adjustment: pooled targets can miss the case where
+            # one store starves while another has surplus. With smart distribution
+            # the common upstream pool will be allocated by demand share, so we
+            # compute each store's expected supply and pump up the order to cover
+            # any individual-store gap that the pooled check overlooked.
+            if smart_distrib and pct_a > 0 and pct_b > 0:
+                def _ps_gap(cov_x, common_pool):
+                    if seasonal_mode:
+                        dx = _lookahead_sum(planner_curve_internal, w + 1, w + cov_x)
+                    else:
+                        dx = ff * cov_x
+                    ap = store_a + sum(dist_pipe_a) + pct_a * common_pool
+                    bp = store_b + sum(dist_pipe_b) + pct_b * common_pool
+                    a_gap = max(0.0, pct_a * dx - ap)
+                    b_gap = max(0.0, pct_b * dx - bp)
+                    return a_gap + b_gap
+
+                pool_ship = 0
+                pool_fp   = sum(fp_pipe) + cw
+                pool_semi = sum(semi_pipe) + semi + sum(fp_pipe) + cw
+                pool_sup  = (sum(mat_pipe) + raw_mat + sum(semi_pipe) + semi
+                           + sum(fp_pipe) + cw + pb)
+
+                od_ship = max(od_ship, math.ceil(max(0, _ps_gap(cov_ship, pool_ship) - ship_backlog)))
+                od_fp   = max(od_fp,   math.ceil(max(0, _ps_gap(cov_fp,   pool_fp)   - fp_backlog)))
+                od_semi = max(od_semi, math.ceil(max(0, _ps_gap(cov_semi, pool_semi) - semi_backlog)))
+                od_sup  = max(od_sup,  math.ceil(max(0, _ps_gap(cov_sup,  pool_sup)  - pb)))
+
             co            += od_sup
             pb            += od_sup
             semi_backlog  += od_semi
