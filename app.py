@@ -391,23 +391,19 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
             'store_stock': round(store_a + store_b, 1),
         })
 
-        # 3. Supplier ships — capacity ramps after factory activation
-        pc = min(cap_start * (1 + pn * cap_ramp), cap_start * 10)
-        if pb > 0.01:
-            shipped = math.ceil(min(pb, pc))
-            pb -= shipped
-        else:
-            shipped = 0.0
-        s['supplier_shipped'] = round(shipped, 1)
-        s['supplier_cap']     = round(pc, 0)
-
-        # 4. Arrivals update buffers
+        # 3. Arrivals update buffers
         raw_mat += m_arr
         semi    += sm_arr
         cw      += fp_arr
         s['raw_mat_before_prod'] = round(raw_mat, 1)
 
-        # 5. Order decision (before processing — factory sees the order)
+        # 4. Order decision (Monday morning — planner reviews against full
+        #    inventory position BEFORE this week's supplier ship). Placing
+        #    the order before the ship in the same week mirrors how a real
+        #    planner operates and eliminates a timing artifact in which
+        #    units just shipped by the supplier were briefly invisible to
+        #    the planner (between pb and mat_pipe), causing systematic
+        #    over-ordering by `shipped` on every review week.
         pre_wip = (sum(mat_pipe) + sum(semi_pipe) + sum(fp_pipe)
                    + sum(dist_pipe_a) + sum(dist_pipe_b)
                    + raw_mat + semi + cw + pb)
@@ -421,6 +417,19 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
             if od > 0 and factory_active_from is None:
                 factory_active_from = w
         s['order'] = round(od, 0)
+
+        # 5. Supplier ships (Monday afternoon — against the now-updated
+        #    backlog, so a fresh order placed this week can start shipping
+        #    immediately if capacity allows). Capacity ramps after factory
+        #    activation.
+        pc = min(cap_start * (1 + pn * cap_ramp), cap_start * 10)
+        if pb > 0.01:
+            shipped = math.ceil(min(pb, pc))
+            pb -= shipped
+        else:
+            shipped = 0.0
+        s['supplier_shipped'] = round(shipped, 1)
+        s['supplier_cap']     = round(pc, 0)
 
         # Processing is allowed when either:
         #   (a) the factory has been activated by a real order, OR
