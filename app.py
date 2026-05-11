@@ -345,11 +345,12 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
     ship_backlog  = 0.0   # CW→stores push orders not yet executed
 
     # Ramp counters: each advances from the week AFTER that stage's first push.
-    pn = sn = fn = dn = 0
+    # No counter for distribution: CW→stores is logistics, not production, and
+    # has no per-week capacity limit.
+    pn = sn = fn = 0
     supplier_active_from = None   # week of first supplier ship > 0
     semi_active_from     = None   # week of first si > 0
     fp_active_from       = None   # week of first fi > 0
-    dist_active_from     = None   # week of first ship_out > 0
 
     co  = 0.0                  # cumulative supplier orders placed
     cas = 0.0                  # cumulative units arrived at stores
@@ -405,7 +406,6 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
         'order': 0, 'order_semi': 0, 'order_fp': 0, 'order_ship': 0,
         'pending': 0, 'backlog': 0,
         'semi_backlog': 0, 'fp_backlog': 0, 'ship_backlog': 0,
-        'dist_cap': cap_start,
         'target_sup': 0, 'planner_factor': None, 'planner_factor_locked': False,
         'wip_total': 0,
         # W0 has no production costs — initial stock is valued separately
@@ -593,20 +593,17 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
         s['semi_stock'] = round(semi, 1)
         s['fp_backlog'] = round(fp_backlog, 1)
 
-        # 8. CW push — cw → dist_pipes. Against ship_backlog, capped by
-        #    cw available AND dist capacity.
-        dc = min(cap_start * (1 + dn * cap_ramp), cap_start * 10)
+        # 8. CW push — cw → dist_pipes. Distribution is pure logistics (trucks,
+        #    picking, transport): no per-week throughput limit. Constrained
+        #    only by available cw and the planner's ship_backlog.
         if cw > 0.01 and ship_backlog > 0.01:
-            ship_out = math.ceil(min(cw, dc, ship_backlog))
+            ship_out = math.ceil(min(cw, ship_backlog))
             cw           -= ship_out
             ship_backlog -= ship_out
         else:
             ship_out = 0.0
-        if ship_out > 0 and dist_active_from is None:
-            dist_active_from = w
         s['cw_shipped']   = round(ship_out, 1)
         s['cw_stock']     = round(cw, 1)
-        s['dist_cap']     = round(dc, 0)
         s['ship_backlog'] = round(ship_backlog, 1)
 
         if ship_out > 0:
@@ -668,7 +665,6 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
         if supplier_active_from is not None and w > supplier_active_from: pn += 1
         if semi_active_from     is not None and w > semi_active_from:     sn += 1
         if fp_active_from       is not None and w > fp_active_from:       fn += 1
-        if dist_active_from     is not None and w > dist_active_from:     dn += 1
 
         # 11. Post-processing WIP (for display)
         total_wip = (sum(mat_pipe) + sum(semi_pipe) + sum(fp_pipe)
