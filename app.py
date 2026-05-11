@@ -1259,6 +1259,7 @@ def make_sc_html(state: dict, params: dict) -> str:
         f'<span style="font-size:12px;color:{C_TXT};">WIP <b style="color:#2a5a8a;">{state.get("wip_total", 0):.0f}</b></span>'
         f'<span style="font-size:12px;">{order_html}</span>'
         f'<span style="font-size:12px;color:{C_TXT};" title="Demand the planner aims to cover in the next LT+freq weeks. The supplier order = max(0, this − stores − all WIP − backlog).">Cover Tgt <b style="color:#1a2a40;">{state.get("target_sup", 0):.0f}</b></span>'
+        f'<span style="font-size:12px;color:{C_TXT};">Forecast <b style="color:#1a2a40;">{state.get("forecast", 0):.0f}</b>/wk</span>'
         f'<span style="font-size:12px;color:{C_TXT};">A:{params.get("store_a_pct", 60)}% B:{100 - params.get("store_a_pct", 60)}%</span>'
         f'</div>'
     )
