@@ -140,7 +140,7 @@ def seasonal_curve(weeks: int, sub_shape: str, avg: float) -> list[int]:
 
     Uses a gamma distribution whose peak position scales with the simulation
     length (peak at ratio × weeks). This keeps the shape recognizable when
-    users change sim length.
+    users change sim length. Returns integers (display/sim-input form).
     """
     ratio, k = SEASONAL_PARAMS.get(sub_shape, SEASONAL_PARAMS["Steep"])
     theta = (ratio * weeks) / max(k - 1, 0.1)
@@ -148,6 +148,20 @@ def seasonal_curve(weeks: int, sub_shape: str, avg: float) -> list[int]:
     pdf_sum = sum(pdf_vals) or 1.0
     total = avg * weeks
     return [max(0, int(round(v * total / pdf_sum))) for v in pdf_vals]
+
+
+def seasonal_curve_float(weeks: int, sub_shape: str, avg: float) -> list[float]:
+    """
+    Same gamma shape as seasonal_curve, but UNROUNDED. Used as the planner's
+    internal belief curve so the discovered amplitude factor is a clean ratio
+    (e.g., exactly 3.0 for avg=300 vs. avg=100, not 2.97 from integer drift).
+    """
+    ratio, k = SEASONAL_PARAMS.get(sub_shape, SEASONAL_PARAMS["Steep"])
+    theta = (ratio * weeks) / max(k - 1, 0.1)
+    pdf_vals = [gamma_pdf(w, k, theta) for w in range(1, weeks + 1)]
+    pdf_sum = sum(pdf_vals) or 1.0
+    total = avg * weeks
+    return [max(0.0, v * total / pdf_sum) for v in pdf_vals]
 
 
 def build_demand_curve(shape: str, weeks: int, *,
@@ -392,6 +406,7 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
         'pending': 0, 'backlog': 0,
         'semi_backlog': 0, 'fp_backlog': 0, 'ship_backlog': 0,
         'dist_cap': cap_start,
+        'target_sup': 0, 'planner_factor': None, 'planner_factor_locked': False,
         'wip_total': 0,
         # W0 has no production costs — initial stock is valued separately
         'cost_mat': 0.0, 'cost_semi': 0.0, 'cost_fp': 0.0,
@@ -526,6 +541,13 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
         s['order_ship'] = round(od_ship, 0)
         s['planner_factor']        = planner_factor
         s['planner_factor_locked'] = (planner_factor_week == w)  # True only on the week of lock
+
+        # Supplier-side lookahead target stored every week (not just review weeks)
+        # so the info bar can always show "demand to cover in next LT+freq wks".
+        if seasonal_mode:
+            s['target_sup'] = round(_lookahead_sum(planner_curve_internal, w + 1, w + cov_sup), 0)
+        else:
+            s['target_sup'] = round(ff * cov_sup, 0)
 
         # 5. Supplier ships — against pb, capped by supplier capacity.
         pc = min(cap_start * (1 + pn * cap_ramp), cap_start * 10)
@@ -1240,7 +1262,7 @@ def make_sc_html(state: dict, params: dict) -> str:
         f'<span style="font-size:12px;color:{C_TXT};">Pending <b style="color:#8a6a20;">{state.get("pending", 0):.0f}</b></span>'
         f'<span style="font-size:12px;color:{C_TXT};">WIP <b style="color:#2a5a8a;">{state.get("wip_total", 0):.0f}</b></span>'
         f'<span style="font-size:12px;">{order_html}</span>'
-        f'<span style="font-size:12px;color:{C_TXT};">Forecast <b style="color:#1a2a40;">{state.get("forecast", 0):.0f}</b>/wk</span>'
+        f'<span style="font-size:12px;color:{C_TXT};" title="Demand the planner aims to cover in the next LT+freq weeks. The supplier order = max(0, this − stores − all WIP − backlog).">Cover Tgt <b style="color:#1a2a40;">{state.get("target_sup", 0):.0f}</b></span>'
         f'<span style="font-size:12px;color:{C_TXT};">A:{params.get("store_a_pct", 60)}% B:{100 - params.get("store_a_pct", 60)}%</span>'
         f'</div>'
     )
@@ -1347,7 +1369,16 @@ def apply_preset(lt_name: str, demand_kind: str, *,
     if is_seasonal:
         dist = STOCK_DIST_SEASONAL[lt_name]
         sell_through = SELL_THROUGH_SEASONAL[lt_name]
-        st.session_state["total_stock"] = int(round(SEASONAL_BASE_STOCK / sell_through))
+        # Stock = (recommended cover) / sell-through, rounded up to nearest 50.
+        # Recommended = sum of demand over the first 'coverage' weeks of the
+        # seasonal curve (matches what the sidebar shows as the recommendation).
+        cov = (lt["mat_lt"] + lt["semi_lt"] + lt["fp_lt"]
+               + lt["dist_lt"] + lt["order_freq"])
+        n = min(cov, PRESET_WEEKS)
+        seas = seasonal_curve(PRESET_WEEKS, seas_sub, seas_avg)
+        base_rec = sum(seas[:n])
+        raw = base_rec / sell_through
+        st.session_state["total_stock"] = int(math.ceil(raw / 50.0) * 50)
     else:
         dist = STOCK_DIST_OPERATIONAL[lt_name]
         coverage = lt["mat_lt"] + lt["semi_lt"] + lt["fp_lt"] + lt["dist_lt"] + lt["order_freq"]
@@ -1526,10 +1557,12 @@ with st.sidebar:
     )
     custom_demand = [0] + [int(row["Demand (pcs)"]) for _, row in edited.iterrows()]
 
-    # Seasonal planner curve: same shape, but scaled to avg=base_forecast
-    # (planner knows the shape, defaults to BASE_FORECAST/wk amplitude).
+    # Seasonal planner curve: same shape, but UNROUNDED floats scaled to
+    # avg=base_forecast. The float form avoids integer rounding drift, so
+    # the discovered factor is a clean ratio (e.g., exactly 3.0× for the
+    # avg=300 preset vs. the planner's avg=100 belief).
     if "Seasonal" in preset_shape:
-        planner_curve = [0] + list(seasonal_curve(weeks, st.session_state.get("seas_sub", "Steep"), BASE_FORECAST))
+        planner_curve = [0.0] + list(seasonal_curve_float(weeks, st.session_state.get("seas_sub", "Steep"), BASE_FORECAST))
     else:
         planner_curve = None
 
@@ -1587,10 +1620,10 @@ with st.sidebar:
     # --- Quick scenarios: seasonal grid (3 LT × 3 seasonal averages, all Steep) ---
     st.markdown("### \U0001f30a Quick Scenarios — Seasonal (Steep)")
     st.caption("3 LT × 3 averages (30 / 100 / 300) · Steep gamma curve · "
-               "stock sized by sell-through target: Agile 100% → 2600 pcs, "
-               "Medium 85% → 3059 pcs, Push 60% → 4333 pcs · "
-               "Distributions: Agile 40/20/10/30, Medium 70/20/10/0, Push 100/0/0/0 · "
-               "A=60%, smart ON")
+               "**stock = recommended cover (sum of first LT+freq wks of demand) ÷ sell-through, "
+               "rounded up to nearest 50** · "
+               "Sell-through targets: Agile 100%, Medium 85%, Push 60% · "
+               "Distributions: Agile 40/20/10/30, Medium 70/20/10/0, Push 100/0/0/0 · A=60%, smart ON")
 
     sh1, sh2, sh3, sh4 = st.columns([1.2, 1, 1, 1])
     with sh2: st.markdown("**Avg 30**")
@@ -1625,10 +1658,12 @@ with st.sidebar:
                         args=("Push", "Seasonal"), kwargs={"seas_avg": 300, "seas_sub": "Steep"})
 
     st.caption(
-        "All presets gate initial WIP behind the first supplier order. "
-        "If the planner never orders (well-sized stock), pre-positioned "
-        "RM/Semi stays unused — a deliberate teaching point about "
-        "over-investing upstream."
+        "**Per-stage push** — each stage (supplier, Semi, FP, CW→stores) has "
+        "its own (R, S) decision at every review week. Initial WIP flows whenever "
+        "its downstream is below target, with no kickstart override needed. "
+        "**Seasonal mode** additionally activates a shape-aware lookahead: the "
+        "planner knows the curve shape but assumes avg=100/wk until the first review "
+        "reveals the true scale."
     )
 
 
@@ -1768,10 +1803,15 @@ if _pf is not None:
     _badge_border = '#d4a018' if state.get('planner_factor_locked') else '#dde3ed'
     _badge_msg = ("⚡ Planner realizes factor of " if state.get('planner_factor_locked')
                   else "Planner factor (locked): ")
+    # Display: drop the decimal if the factor is essentially integer
+    if abs(_pf - round(_pf)) < 0.05:
+        _pf_str = f"{round(_pf):.0f}×"
+    else:
+        _pf_str = f"{_pf:.1f}×"
     st.markdown(
         f'<div style="background:{_badge_bg};border:1px solid {_badge_border};'
         f'border-radius:8px;padding:8px 16px;margin-bottom:8px;font-size:14px;'
-        f'color:#1a2a40;"><b>{_badge_msg}{_pf:.2f}×</b> '
+        f'color:#1a2a40;"><b>{_badge_msg}{_pf_str}</b> '
         f'<span style="color:#5a6a7e;font-size:12px;">— planner started from a shape × '
         f'{BASE_FORECAST}/wk default; after the first review, all seasonal targets are scaled '
         f'by this factor.</span></div>',
