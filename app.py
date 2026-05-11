@@ -218,7 +218,8 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
                    cap_start, cap_ramp, base_forecast,
                    price, var_cost, fixed_pct, store_a_pct, smart_distrib,
                    debug=False,
-                   custom_demand=None):
+                   custom_demand=None,
+                   planner_curve=None):
     """
     Run the weekly supply-chain simulation and return a list of per-week state
     dicts (index 0 = W0 initial state, indices 1..weeks = simulated weeks).
@@ -252,12 +253,33 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
     that stage's first push (independent activation flags). Same forecast
     `ff` is used for all stages and is updated on review weeks only.
 
+    Seasonal forecasting (v3.1)
+    ---------------------------
+    If `planner_curve` is provided (length weeks+1, index 0 ignored), the
+    planner uses a SHAPE-aware lookahead in place of the constant-forecast
+    `ff × coverage`:
+
+      • The planner believes the curve is `planner_curve` (scaled to an
+        avg of base_forecast/wk — i.e., the planner knows the shape but
+        guesses an amplitude).
+      • At the FIRST review week, the planner computes one adjustment
+        factor `f = sum(actual_demand[1..w]) / sum(planner_curve[1..w])`
+        and locks it for the rest of the simulation.
+      • For each subsequent review and each stage, the target is
+        `Σ planner_curve[w+1..w+cov_x] × f`, capped at sim end (no
+        hypothetical future demand beyond `weeks`).
+
+    Non-seasonal modes (`planner_curve is None`) keep v3 `ff × coverage`.
+
     Parameters
     ----------
     debug : bool
         If True, runtime sanity assertions are active (conservation checks).
     custom_demand : sequence or None
         Per-week demand override indexed 0..weeks (index 0 ignored).
+    planner_curve : sequence or None
+        Planner's belief about the demand shape, scaled to avg base_forecast.
+        Length weeks+1 (index 0 ignored). Triggers seasonal lookahead mode.
 
     Returns
     -------
@@ -320,7 +342,30 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
     smart_discovered = False   # planner discovers A/B imbalance at first review
 
     order_weeks = list(range(order_freq, weeks + 1, order_freq)) if order_freq > 1 else list(range(1, weeks + 1))
-    ff = float(base_forecast)  # forecast — updates on review weeks only
+    ff = float(base_forecast)  # forecast — updates on review weeks only (flat mode)
+
+    # --- Seasonal planner state ---
+    seasonal_mode = planner_curve is not None
+    planner_factor = None      # locked once at first review
+    planner_factor_week = None # for one-time UI message
+    if seasonal_mode:
+        # Pad curve to weeks + max coverage so lookahead always has values
+        # (past sim end → 0, per spec).
+        max_cov = phys_lt + order_freq
+        pc = [0.0] * (weeks + max_cov + 2)
+        for i in range(min(len(planner_curve), weeks + 1)):
+            pc[i] = float(planner_curve[i])
+        planner_curve_internal = pc
+    else:
+        planner_curve_internal = None
+
+    def _lookahead_sum(curve, w_from, w_to):
+        """Sum of curve[w_from .. w_to] inclusive, scaled by planner_factor."""
+        s = 0.0
+        for i in range(w_from, w_to + 1):
+            if 0 <= i < len(curve):
+                s += curve[i]
+        return s * (planner_factor or 1.0)
 
     # --- W0 initial state ---
     s0 = {
@@ -417,11 +462,25 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
 
         # 4. Planner review (only on review weeks). Computes four push
         #    orders in parallel — one per stage — each comparing a target
-        #    (forecast × downstream coverage) against a downstream existing
-        #    position that includes that stage's own outstanding backlog
-        #    (so consecutive reviews don't double-count).
+        #    against a downstream existing position that includes that
+        #    stage's own outstanding backlog (so consecutive reviews don't
+        #    double-count).
+        #
+        #    Flat / Ramp / Drop:  target = ff × cov_x          (constant)
+        #    Seasonal:            target = Σ planner_curve[w+1..w+cov_x] × f
+        #                         where f is locked at the first review.
         od_sup = od_semi = od_fp = od_ship = 0
         if w in order_weeks:
+            # Lock the planner's adjustment factor on the first review.
+            if seasonal_mode and planner_factor is None:
+                actual_cum   = sum(demand[i] for i in range(1, w + 1))
+                expected_cum = sum(planner_curve_internal[i] for i in range(1, w + 1))
+                if expected_cum > 0.01:
+                    planner_factor = actual_cum / expected_cum
+                else:
+                    planner_factor = 1.0
+                planner_factor_week = w
+
             existing_sup  = (store_a + store_b
                            + sum(mat_pipe) + raw_mat
                            + sum(semi_pipe) + semi
@@ -440,10 +499,22 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
             existing_ship = (store_a + store_b
                            + sum(dist_pipe_a) + sum(dist_pipe_b)
                            + ship_backlog)
-            od_sup  = math.ceil(max(0, ff * cov_sup  - existing_sup))
-            od_semi = math.ceil(max(0, ff * cov_semi - existing_semi))
-            od_fp   = math.ceil(max(0, ff * cov_fp   - existing_fp))
-            od_ship = math.ceil(max(0, ff * cov_ship - existing_ship))
+
+            if seasonal_mode:
+                tgt_sup  = _lookahead_sum(planner_curve_internal, w + 1, w + cov_sup)
+                tgt_semi = _lookahead_sum(planner_curve_internal, w + 1, w + cov_semi)
+                tgt_fp   = _lookahead_sum(planner_curve_internal, w + 1, w + cov_fp)
+                tgt_ship = _lookahead_sum(planner_curve_internal, w + 1, w + cov_ship)
+            else:
+                tgt_sup  = ff * cov_sup
+                tgt_semi = ff * cov_semi
+                tgt_fp   = ff * cov_fp
+                tgt_ship = ff * cov_ship
+
+            od_sup  = math.ceil(max(0, tgt_sup  - existing_sup))
+            od_semi = math.ceil(max(0, tgt_semi - existing_semi))
+            od_fp   = math.ceil(max(0, tgt_fp   - existing_fp))
+            od_ship = math.ceil(max(0, tgt_ship - existing_ship))
             co            += od_sup
             pb            += od_sup
             semi_backlog  += od_semi
@@ -453,6 +524,8 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
         s['order_semi'] = round(od_semi, 0)
         s['order_fp']   = round(od_fp, 0)
         s['order_ship'] = round(od_ship, 0)
+        s['planner_factor']        = planner_factor
+        s['planner_factor_locked'] = (planner_factor_week == w)  # True only on the week of lock
 
         # 5. Supplier ships — against pb, capped by supplier capacity.
         pc = min(cap_start * (1 + pn * cap_ramp), cap_start * 10)
@@ -825,13 +898,18 @@ def reconciliation_report(states, kpis, params):
     ))
 
     # Check 2: value conservation (in = out + remaining)
+    # Tolerance is relative because per-week costs are stored rounded to
+    # one decimal — over hundreds of weeks × 3 stages, rounding drift can
+    # reach a few €. The P&L identity (Check 3) is the strict guarantee.
     value_in = kpis['init_stock_value'] + kpis['prod_cost']
     value_remaining = kpis['leftover_value']
     value_sold = kpis['cost_of_sold']
+    diff = abs(value_in - value_sold - value_remaining)
+    tol = max(10.0, value_in * 1e-4)
     checks.append((
         "Stage value conserved",
-        abs(value_in - value_sold - value_remaining) < 1.0,
-        f"VC (€{value_in:,.0f}) ≈ sold (€{value_sold:,.0f}) + leftover (€{value_remaining:,.0f})",
+        diff < tol,
+        f"VC (€{value_in:,.0f}) ≈ sold (€{value_sold:,.0f}) + leftover (€{value_remaining:,.0f}), Δ=€{diff:.1f}",
     ))
 
     # Check 3: P&L identity
@@ -1448,6 +1526,13 @@ with st.sidebar:
     )
     custom_demand = [0] + [int(row["Demand (pcs)"]) for _, row in edited.iterrows()]
 
+    # Seasonal planner curve: same shape, but scaled to avg=base_forecast
+    # (planner knows the shape, defaults to BASE_FORECAST/wk amplitude).
+    if "Seasonal" in preset_shape:
+        planner_curve = [0] + list(seasonal_curve(weeks, st.session_state.get("seas_sub", "Steep"), BASE_FORECAST))
+    else:
+        planner_curve = None
+
     # --- Capacity ---
     st.markdown("### \U0001f3ed Capacity")
     cap_start = st.number_input("Starting Capacity (pcs/wk)", 10, 1000, 100)
@@ -1565,7 +1650,8 @@ params = {
     'price': price, 'var_cost': var_cost, 'fixed_pct': fixed_pct,
     'store_a_pct': store_a_pct, 'smart_distrib': smart_distrib,
     'debug': debug_mode,
-    'custom_demand': tuple(custom_demand),
+    'custom_demand':  tuple(custom_demand),
+    'planner_curve':  tuple(planner_curve) if planner_curve is not None else None,
 }
 
 states = run_simulation(**params)
@@ -1672,6 +1758,26 @@ _stage_h  = _rows_needed * 145
 _stores_h = 2 * 118 + 10 + 28   # 2 store cards + gap + header; sized so LOST badge doesn't clip
 _content_h = max(_stage_h, _stores_h)
 _viz_h = 48 + 16 + _content_h + 28 + 32   # info bar + pad + content + phys flow + comment
+
+# One-time planner-factor message: shown on the week the factor is locked
+# (i.e., the first review week in seasonal mode) and remains visible
+# afterwards as a small chip.
+_pf = state.get('planner_factor')
+if _pf is not None:
+    _badge_bg = '#fff5d6' if state.get('planner_factor_locked') else '#f0f2f5'
+    _badge_border = '#d4a018' if state.get('planner_factor_locked') else '#dde3ed'
+    _badge_msg = ("⚡ Planner realizes factor of " if state.get('planner_factor_locked')
+                  else "Planner factor (locked): ")
+    st.markdown(
+        f'<div style="background:{_badge_bg};border:1px solid {_badge_border};'
+        f'border-radius:8px;padding:8px 16px;margin-bottom:8px;font-size:14px;'
+        f'color:#1a2a40;"><b>{_badge_msg}{_pf:.2f}×</b> '
+        f'<span style="color:#5a6a7e;font-size:12px;">— planner started from a shape × '
+        f'{BASE_FORECAST}/wk default; after the first review, all seasonal targets are scaled '
+        f'by this factor.</span></div>',
+        unsafe_allow_html=True,
+    )
+
 st.components.v1.html(make_sc_html(state, params), height=_viz_h, scrolling=False)
 
 
