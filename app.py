@@ -111,7 +111,7 @@ _DEFAULTS = {
     "store_pct": 40, "wh_pct": 20, "semi_pct": 10,
     "store_a_pct": 60, "smart_distrib": True,
     "demand_shape": DEMAND_SHAPES[0],
-    "kickstart": False,
+    # "kickstart": False,  # removed in v3
     "debug_mode": False,
     "week_num": 0,
     "seas_sub": "Steep",
@@ -217,7 +217,7 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
                    order_freq, mat_lt, semi_lt, fp_lt, dist_lt,
                    cap_start, cap_ramp, base_forecast,
                    price, var_cost, fixed_pct, store_a_pct, smart_distrib,
-                   kickstart=True, debug=False,
+                   debug=False,
                    custom_demand=None):
     """
     Run the weekly supply-chain simulation and return a list of per-week state
@@ -232,25 +232,28 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
     W0 has zero production costs — initial stock is valued separately in
     compute_kpis via init_stock_value (no double-counting).
 
-    Factory activation & capacity ramp
-    ----------------------------------
-    Two independent gates control processing:
+    Per-stage push policy (v3 "advanced stage ordering")
+    ----------------------------------------------------
+    Each push lever has its own (R, S) decision applied at review weeks
+    (every `order_freq` weeks), parallel to the supplier order:
 
-      1. `factory_active_from` is set ONLY by the first supplier order. Once
-         set, Semi and FP processing run every week (capacity-limited) and
-         the ramp counters (pn/sn/fn) advance from the next week.
+        Lever            Downstream span (cov.)          Backlog variable
+        ---------------- ------------------------------- ------------------
+        Supplier order   mat+semi+fp+dist+freq           pb
+        si  (RM→Semi)    semi+fp+dist+freq               semi_backlog
+        fi  (Semi→FP)    fp+dist+freq                    fp_backlog
+        CW push          dist+freq                       ship_backlog
 
-      2. `kickstart` (one-shot at W1): if True and initial RM or Semi exists,
-         Semi and FP each run ONCE at W1 only — pushing one wave of initial
-         WIP one stage forward. This unsticks seasonal scenarios where the
-         planner never orders because initial stock is well-sized. After W1,
-         processing pauses again and waits for the first real order.
+    At review week w:  order_x = max(0, target_x − existing_x); backlog_x += order_x
+    Between reviews:   each lever executes from its backlog at its own
+                       per-week capacity, capped by the upstream buffer.
+
+    Per-stage ramp counters (pn/sn/fn/dn) advance starting the week AFTER
+    that stage's first push (independent activation flags). Same forecast
+    `ff` is used for all stages and is updated on review weeks only.
 
     Parameters
     ----------
-    kickstart : bool
-        If True, do a one-shot Semi+FP processing pass at W1 when initial
-        RM/Semi exist. Does NOT permanently activate the factory.
     debug : bool
         If True, runtime sanity assertions are active (conservation checks).
     custom_demand : sequence or None
@@ -266,6 +269,13 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
     coverage = phys_lt + order_freq
     pct_a = store_a_pct / 100.0
     pct_b = 1.0 - pct_a
+
+    # Per-stage downstream coverages (how many weeks of demand each stage
+    # must keep covered DOWNSTREAM of its own push point, including freq).
+    cov_sup  = coverage
+    cov_semi = semi_lt + fp_lt + dist_lt + order_freq
+    cov_fp   = fp_lt + dist_lt + order_freq
+    cov_ship = dist_lt + order_freq
 
     # --- Demand curve ---
     demand = {0: 0}
@@ -284,25 +294,30 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
     dist_pipe_b = [0.0] * max(1, dist_lt)
 
     # --- Buffers ---
-    # Initial store stock always split 50/50 — planner hasn't reviewed yet
     store_a = float(init_store) / 2.0
     store_b = float(init_store) / 2.0
     raw_mat = float(init_rawmat)
     semi    = float(init_semi)
     cw      = float(init_cw)
 
-    # --- Supplier / factory state ---
-    pb = 0.0                   # supplier backlog
-    pn = sn = fn = 0           # ramp counters (all gated on factory_active_from)
-    co = 0.0                   # cumulative orders placed
+    # --- Per-stage state ---
+    # Backlogs: units the planner has decided to push at each stage but
+    # which have not yet been physically processed.
+    pb            = 0.0   # supplier backlog (orders placed, not yet shipped)
+    semi_backlog  = 0.0   # RM→Semi push orders not yet executed
+    fp_backlog    = 0.0   # Semi→FP push orders not yet executed
+    ship_backlog  = 0.0   # CW→stores push orders not yet executed
+
+    # Ramp counters: each advances from the week AFTER that stage's first push.
+    pn = sn = fn = dn = 0
+    supplier_active_from = None   # week of first supplier ship > 0
+    semi_active_from     = None   # week of first si > 0
+    fp_active_from       = None   # week of first fi > 0
+    dist_active_from     = None   # week of first ship_out > 0
+
+    co  = 0.0                  # cumulative supplier orders placed
     cas = 0.0                  # cumulative units arrived at stores
     smart_discovered = False   # planner discovers A/B imbalance at first review
-
-    # Two independent gates (see docstring):
-    #   factory_active_from — set on first supplier order, then permanent
-    #   do_kickstart        — one-shot processing at W1 only
-    factory_active_from = None
-    do_kickstart = kickstart and (init_rawmat > 0 or init_semi > 0)
 
     order_weeks = list(range(order_freq, weeks + 1, order_freq)) if order_freq > 1 else list(range(1, weeks + 1))
     ff = float(base_forecast)  # forecast — updates on review weeks only
@@ -328,7 +343,10 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
         'fp_pipe':     list(fp_pipe),
         'dist_pipe_a': list(dist_pipe_a),
         'dist_pipe_b': list(dist_pipe_b),
-        'order': 0, 'pending': 0, 'backlog': 0,
+        'order': 0, 'order_semi': 0, 'order_fp': 0, 'order_ship': 0,
+        'pending': 0, 'backlog': 0,
+        'semi_backlog': 0, 'fp_backlog': 0, 'ship_backlog': 0,
+        'dist_cap': cap_start,
         'wip_total': 0,
         # W0 has no production costs — initial stock is valued separately
         'cost_mat': 0.0, 'cost_semi': 0.0, 'cost_fp': 0.0,
@@ -397,72 +415,104 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
         cw      += fp_arr
         s['raw_mat_before_prod'] = round(raw_mat, 1)
 
-        # 4. Order decision (Monday morning — planner reviews against full
-        #    inventory position BEFORE this week's supplier ship). Placing
-        #    the order before the ship in the same week mirrors how a real
-        #    planner operates and eliminates a timing artifact in which
-        #    units just shipped by the supplier were briefly invisible to
-        #    the planner (between pb and mat_pipe), causing systematic
-        #    over-ordering by `shipped` on every review week.
-        pre_wip = (sum(mat_pipe) + sum(semi_pipe) + sum(fp_pipe)
-                   + sum(dist_pipe_a) + sum(dist_pipe_b)
-                   + raw_mat + semi + cw + pb)
-        od = 0
+        # 4. Planner review (only on review weeks). Computes four push
+        #    orders in parallel — one per stage — each comparing a target
+        #    (forecast × downstream coverage) against a downstream existing
+        #    position that includes that stage's own outstanding backlog
+        #    (so consecutive reviews don't double-count).
+        od_sup = od_semi = od_fp = od_ship = 0
         if w in order_weeks:
-            tgt = ff * coverage
-            existing = (store_a + store_b) + pre_wip
-            od = math.ceil(max(0, tgt - existing))
-            co += od
-            pb += od
-            if od > 0 and factory_active_from is None:
-                factory_active_from = w
-        s['order'] = round(od, 0)
+            existing_sup  = (store_a + store_b
+                           + sum(mat_pipe) + raw_mat
+                           + sum(semi_pipe) + semi
+                           + sum(fp_pipe) + cw
+                           + sum(dist_pipe_a) + sum(dist_pipe_b)
+                           + pb)
+            existing_semi = (store_a + store_b
+                           + sum(semi_pipe) + semi
+                           + sum(fp_pipe) + cw
+                           + sum(dist_pipe_a) + sum(dist_pipe_b)
+                           + semi_backlog)
+            existing_fp   = (store_a + store_b
+                           + sum(fp_pipe) + cw
+                           + sum(dist_pipe_a) + sum(dist_pipe_b)
+                           + fp_backlog)
+            existing_ship = (store_a + store_b
+                           + sum(dist_pipe_a) + sum(dist_pipe_b)
+                           + ship_backlog)
+            od_sup  = math.ceil(max(0, ff * cov_sup  - existing_sup))
+            od_semi = math.ceil(max(0, ff * cov_semi - existing_semi))
+            od_fp   = math.ceil(max(0, ff * cov_fp   - existing_fp))
+            od_ship = math.ceil(max(0, ff * cov_ship - existing_ship))
+            co            += od_sup
+            pb            += od_sup
+            semi_backlog  += od_semi
+            fp_backlog    += od_fp
+            ship_backlog  += od_ship
+        s['order']      = round(od_sup, 0)   # 'order' = supplier order (legacy field name)
+        s['order_semi'] = round(od_semi, 0)
+        s['order_fp']   = round(od_fp, 0)
+        s['order_ship'] = round(od_ship, 0)
 
-        # 5. Supplier ships (Monday afternoon — against the now-updated
-        #    backlog, so a fresh order placed this week can start shipping
-        #    immediately if capacity allows). Capacity ramps after factory
-        #    activation.
+        # 5. Supplier ships — against pb, capped by supplier capacity.
         pc = min(cap_start * (1 + pn * cap_ramp), cap_start * 10)
         if pb > 0.01:
             shipped = math.ceil(min(pb, pc))
             pb -= shipped
         else:
             shipped = 0.0
+        if shipped > 0 and supplier_active_from is None:
+            supplier_active_from = w
         s['supplier_shipped'] = round(shipped, 1)
         s['supplier_cap']     = round(pc, 0)
 
-        # Processing is allowed when either:
-        #   (a) the factory has been activated by a real order, OR
-        #   (b) we're in the one-shot kickstart window (W1 only)
-        allow_proc = (factory_active_from is not None) or (do_kickstart and w == 1)
-
-        # 6. Semi processing (RM → Semi)
+        # 6. Semi processing — RM → semi_pipe. Against semi_backlog, capped
+        #    by RM available AND semi capacity.
         sc_ = min(cap_start * (1 + sn * cap_ramp), cap_start * 10)
-        if raw_mat > 0.01 and allow_proc:
-            si = math.ceil(min(raw_mat, sc_))
-            raw_mat -= si
+        if raw_mat > 0.01 and semi_backlog > 0.01:
+            si = math.ceil(min(raw_mat, sc_, semi_backlog))
+            raw_mat      -= si
+            semi_backlog -= si
         else:
             si = 0.0
-        s['semi_input'] = round(si, 1)
-        s['semi_cap']   = round(sc_, 0)
+        if si > 0 and semi_active_from is None:
+            semi_active_from = w
+        s['semi_input']    = round(si, 1)
+        s['semi_cap']      = round(sc_, 0)
         s['raw_mat_stock'] = round(raw_mat, 1)
+        s['semi_backlog']  = round(semi_backlog, 1)
 
-        # 7. FP processing (Semi → FP)
+        # 7. FP processing — Semi → fp_pipe. Against fp_backlog, capped by
+        #    Semi available AND FP capacity.
         fpc = min(cap_start * (1 + fn * cap_ramp), cap_start * 10)
-        if semi > 0.01 and allow_proc:
-            fi = math.ceil(min(semi, fpc))
-            semi -= fi
+        if semi > 0.01 and fp_backlog > 0.01:
+            fi = math.ceil(min(semi, fpc, fp_backlog))
+            semi       -= fi
+            fp_backlog -= fi
         else:
             fi = 0.0
+        if fi > 0 and fp_active_from is None:
+            fp_active_from = w
         s['fp_input']   = round(fi, 1)
         s['fp_cap']     = round(fpc, 0)
         s['semi_stock'] = round(semi, 1)
+        s['fp_backlog'] = round(fp_backlog, 1)
 
-        # 8. CW → stores (push all, allocate per-store)
-        ship_out = math.ceil(cw) if cw > 0.01 else 0.0
-        cw -= ship_out
-        s['cw_shipped'] = round(ship_out, 1)
-        s['cw_stock']   = round(cw, 1)
+        # 8. CW push — cw → dist_pipes. Against ship_backlog, capped by
+        #    cw available AND dist capacity.
+        dc = min(cap_start * (1 + dn * cap_ramp), cap_start * 10)
+        if cw > 0.01 and ship_backlog > 0.01:
+            ship_out = math.ceil(min(cw, dc, ship_backlog))
+            cw           -= ship_out
+            ship_backlog -= ship_out
+        else:
+            ship_out = 0.0
+        if ship_out > 0 and dist_active_from is None:
+            dist_active_from = w
+        s['cw_shipped']   = round(ship_out, 1)
+        s['cw_stock']     = round(cw, 1)
+        s['dist_cap']     = round(dc, 0)
+        s['ship_backlog'] = round(ship_backlog, 1)
 
         if ship_out > 0:
             if smart_distrib and smart_discovered:
@@ -516,9 +566,14 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
         s['cost_semi'] = round(si      * var_cost * (VALOR_SEMI - VALOR_RAW_MAT), 1)
         s['cost_fp']   = round(fi      * var_cost * (VALOR_FINISHED - VALOR_SEMI), 1)
 
-        # 10. Ramp counters advance the week AFTER factory activation
-        if factory_active_from is not None and w > factory_active_from:
-            pn += 1; sn += 1; fn += 1
+        # 10. Per-stage ramp counters advance the week AFTER that stage's
+        #     first push. Each stage has its own activation flag — supplier,
+        #     semi, fp, and dist all warm up independently based on when
+        #     they were first asked to do something.
+        if supplier_active_from is not None and w > supplier_active_from: pn += 1
+        if semi_active_from     is not None and w > semi_active_from:     sn += 1
+        if fp_active_from       is not None and w > fp_active_from:       fn += 1
+        if dist_active_from     is not None and w > dist_active_from:     dn += 1
 
         # 11. Post-processing WIP (for display)
         total_wip = (sum(mat_pipe) + sum(semi_pipe) + sum(fp_pipe)
@@ -539,10 +594,14 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
             parts.append(f"B: lost {missed_b:.0f}/{dem_b:.0f}.")
         else:
             parts.append(f"B: sold {sales_b:.0f}/{dem_b:.0f}, stk {store_b:.0f}.")
-        if s['order'] > 0:
-            parts.append(f"ORDER {od:.0f}.")
+        if od_sup > 0:
+            parts.append(f"ORDER {od_sup:.0f}.")
+        if od_semi > 0 or od_fp > 0 or od_ship > 0:
+            parts.append(f"Push targets — Semi {od_semi:.0f}, FP {od_fp:.0f}, Ship {od_ship:.0f}.")
         if shipped > 0.5:
             parts.append(f"Supplier {shipped:.0f}.")
+        if si > 0.5: parts.append(f"Semi proc {si:.0f}.")
+        if fi > 0.5: parts.append(f"FP proc {fi:.0f}.")
         if ship_out > 0.5:
             mode = "smart" if (smart_distrib and smart_discovered) else "push 50/50"
             parts.append(f"WH→A:{alloc_a:.0f} B:{alloc_b:.0f} ({mode}).")
@@ -553,6 +612,9 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
             assert store_a >= -0.5 and store_b >= -0.5, f"W{w}: negative store stock"
             assert raw_mat >= -0.5 and semi >= -0.5 and cw >= -0.5, f"W{w}: negative buffer"
             assert pb >= -0.5, f"W{w}: negative backlog"
+            assert semi_backlog >= -0.5, f"W{w}: negative semi_backlog"
+            assert fp_backlog >= -0.5, f"W{w}: negative fp_backlog"
+            assert ship_backlog >= -0.5, f"W{w}: negative ship_backlog"
 
         states.append(s)
 
@@ -1217,7 +1279,7 @@ def apply_preset(lt_name: str, demand_kind: str, *,
     # places an order. If pre-positioned RM/Semi never gets used because the
     # planner never orders, that's a real teaching point about over-investing
     # upstream — not something to paper over with a force-process.
-    st.session_state["kickstart"]    = False
+    # kickstart removed in v3 — per-stage push policy supersedes it
 
     st.session_state["store_pct"]    = dist["store_pct"]
     st.session_state["wh_pct"]       = dist["wh_pct"]
@@ -1404,22 +1466,9 @@ with st.sidebar:
     )
     fixed_pct = st.slider("Fixed Cost (% of sim period fcst rev)", 0, 100, 45) / 100
 
-    # --- Engine options ---
-    st.markdown("### ⚙️ Engine Options")
-    kickstart = st.toggle(
-        "Kickstart factory at W1 (force-process initial RM/Semi)",
-        key="kickstart",
-        help="If ON and initial RM/Semi > 0, factory becomes active at W1 even before "
-             "the first order is placed. Fixes the 'seasonal ~Flat' edge case where "
-             "initial stock is well-sized and the planner never orders. Drop scenarios "
-             "(no initial RM/Semi) are unaffected.",
-    )
-    debug_mode = st.toggle(
-        "Debug mode (runtime asserts + Debug expander)",
-        key="debug_mode",
-        help="Enables conservation assertions inside the engine and shows a Debug "
-             "expander on the main page with reconciliation diagnostics.",
-    )
+    # No engine toggles in v3 — kickstart is superseded by the per-stage
+    # push policy, and reconciliation runs silently every simulation.
+    debug_mode = False
 
     # --- Quick scenarios: permanent grid (3 LT × 3 demand) ---
     st.markdown("---")
@@ -1515,7 +1564,7 @@ params = {
     'base_forecast': BASE_FORECAST,
     'price': price, 'var_cost': var_cost, 'fixed_pct': fixed_pct,
     'store_a_pct': store_a_pct, 'smart_distrib': smart_distrib,
-    'kickstart': kickstart, 'debug': debug_mode,
+    'debug': debug_mode,
     'custom_demand': tuple(custom_demand),
 }
 
@@ -1543,13 +1592,12 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- Header ---
-st.markdown("# \U0001f3ed Supply Chain Agility Simulator")
+st.markdown("# \U0001f3ed Supply Chain Agility Simulator — Advanced Stage Ordering")
 distrib_mode = "Smart" if smart_distrib else "Push 50/50"
-kick_tag = " | Kickstart ON" if kickstart else ""
 st.markdown(
     f"*LT = **{phys_lt}**wk | Coverage = **{coverage}**wk | "
     f"Demand: **{demand_description}** | A: **{store_a_pct}%** / B: **{100-store_a_pct}%** | "
-    f"{distrib_mode}{kick_tag}*"
+    f"{distrib_mode} · per-stage push policy at each review week*"
 )
 
 # --- Week navigation ---
