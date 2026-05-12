@@ -1479,7 +1479,7 @@ with st.sidebar:
         f'<span style="color:#a8b4c4;">— based on demand profile "{_ds}"</span></div>',
         unsafe_allow_html=True,
     )
-    total_stock = st.slider("Total Initial Stock (pcs)", min_value=0, max_value=10000, step=50, key="total_stock")
+    total_stock = st.slider("Total Initial Stock (pcs)", min_value=0, max_value=50000, step=50, key="total_stock")
 
     st.caption("Distribution (% of total):")
     # Guard against stale percentages summing > 100 after a preset switch
