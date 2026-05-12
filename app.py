@@ -1386,14 +1386,16 @@ def apply_preset(lt_name: str, demand_kind: str, *,
     if is_seasonal:
         dist = STOCK_DIST_SEASONAL[lt_name]
         sell_through = SELL_THROUGH_SEASONAL[lt_name]
-        # Stock = (recommended cover) / sell-through, rounded up to nearest 50.
-        # Recommended = sum of demand over the first 'coverage' weeks of the
-        # seasonal curve (matches what the sidebar shows as the recommendation).
+        # Stock is sized to the recommended cover at avg = BASE_FORECAST/wk
+        # (NOT at the preset's seas_avg). This keeps the initial stock
+        # constant across the 9 seasonal scenarios for a given LT profile,
+        # so the comparison "30 vs 100 vs 300" actually shows the impact
+        # of demand level, not stock level.
         cov = (lt["mat_lt"] + lt["semi_lt"] + lt["fp_lt"]
                + lt["dist_lt"] + lt["order_freq"])
         n = min(cov, PRESET_WEEKS)
-        seas = seasonal_curve(PRESET_WEEKS, seas_sub, seas_avg)
-        base_rec = sum(seas[:n])
+        seas_baseline = seasonal_curve(PRESET_WEEKS, seas_sub, BASE_FORECAST)
+        base_rec = sum(seas_baseline[:n])
         raw = base_rec / sell_through
         st.session_state["total_stock"] = int(math.ceil(raw / 50.0) * 50)
     else:
@@ -1479,7 +1481,7 @@ with st.sidebar:
         f'<span style="color:#a8b4c4;">— based on demand profile "{_ds}"</span></div>',
         unsafe_allow_html=True,
     )
-    total_stock = st.slider("Total Initial Stock (pcs)", min_value=0, max_value=50000, step=50, key="total_stock")
+    total_stock = st.slider("Total Initial Stock (pcs)", min_value=0, max_value=10000, step=50, key="total_stock")
 
     st.caption("Distribution (% of total):")
     # Guard against stale percentages summing > 100 after a preset switch
@@ -1633,9 +1635,9 @@ with st.sidebar:
     # --- Quick scenarios: seasonal grid (3 LT × 3 seasonal averages, all Steep) ---
     st.markdown("### \U0001f30a Quick Scenarios — Seasonal (Steep)")
     st.caption("3 LT × 3 averages (30 / 100 / 300) · Steep gamma curve · "
-               "**stock = recommended cover (sum of first LT+freq wks of demand) ÷ sell-through, "
-               "rounded up to nearest 50** · "
-               "Sell-through targets: Agile 100%, Medium 85%, Push 60% · "
+               "**stock sized at avg=100/wk recommendation (constant across the 3 averages) "
+               "÷ sell-through, rounded up to 50** — keeps the comparison apples-to-apples · "
+               "Sell-through: Agile 100% → ~1650 pcs, Medium 85% → ~2950, Push 60% → ~4350 · "
                "Distributions: Agile 40/20/10/30, Medium 70/20/10/0, Push 100/0/0/0 · A=60%, smart ON")
 
     sh1, sh2, sh3, sh4 = st.columns([1.2, 1, 1, 1])
