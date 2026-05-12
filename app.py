@@ -678,13 +678,13 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
         s['cost_semi'] = round(si      * var_cost * (VALOR_SEMI - VALOR_RAW_MAT), 1)
         s['cost_fp']   = round(fi      * var_cost * (VALOR_FINISHED - VALOR_SEMI), 1)
 
-        # 10. Per-stage ramp counters advance the week AFTER that stage's
-        #     first push. Each stage has its own activation flag — supplier,
-        #     semi, fp, and dist all warm up independently based on when
-        #     they were first asked to do something.
-        if supplier_active_from is not None and w > supplier_active_from: pn += 1
-        if semi_active_from     is not None and w > semi_active_from:     sn += 1
-        if fp_active_from       is not None and w > fp_active_from:       fn += 1
+        # 10. Per-stage ramp counters: each stage's first push runs at base
+        #     capacity (pn/sn/fn = 0). Increment fires AT THE END of the
+        #     first-push week so the NEXT week starts at the first ramped
+        #     level. Each stage warms up independently.
+        if supplier_active_from is not None and w >= supplier_active_from: pn += 1
+        if semi_active_from     is not None and w >= semi_active_from:     sn += 1
+        if fp_active_from       is not None and w >= fp_active_from:       fn += 1
 
         # 11. Post-processing WIP (for display)
         total_wip = (sum(mat_pipe) + sum(semi_pipe) + sum(fp_pipe)
