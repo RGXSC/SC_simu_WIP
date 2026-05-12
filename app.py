@@ -111,6 +111,7 @@ _DEFAULTS = {
     "store_pct": 40, "wh_pct": 20, "semi_pct": 10,
     "store_a_pct": 60, "smart_distrib": True,
     "demand_shape": DEMAND_SHAPES[0],
+    "app_mode": "Single Scenario",
     # "kickstart": False,  # removed in v3
     "debug_mode": False,
     "week_num": 0,
@@ -1437,11 +1438,334 @@ def apply_preset(lt_name: str, demand_kind: str, *,
 
 
 # ════════════════════════════════════════════════════════════════
+# BATCH COMPARISON UI
+# ════════════════════════════════════════════════════════════════
+#
+# A second page-mode that lets the user define many scenarios as rows
+# of a table and run them in parallel, then export results as CSV (which
+# can also be pasted back later to restore a saved batch).
+
+import io
+
+# Per-row input column names (≤ 22, each on max 2 lines via \n).
+BATCH_INPUT_COLS = [
+    "Scenario\nLabel",
+    "Sim\nWeeks",
+    "Material\nLT (wk)",
+    "Semi\nLT (wk)",
+    "Finishing\nLT (wk)",
+    "Distribution\nLT (wk)",
+    "Order\nFreq (wk)",
+    "Total Init\nStock (pcs)",
+    "Init Store\n%",
+    "Init WH\n%",
+    "Init Semi\n%",
+    "Store A\n% demand",
+    "Smart\nDistrib",
+    "Demand\nShape",
+    "Linear End\n(pcs/wk)",
+    "Linear\nTransition (wk)",
+    "Seasonal\nSub-shape",
+    "Seasonal Avg\n(pcs/wk)",
+    "Capacity\nStart (pcs/wk)",
+    "Capacity Ramp\n(%/wk)",
+    "Price\n(€/pc)",
+    "Var Cost\n(€/pc)",
+    "Fixed Cost\n% of fcst rev",
+]
+
+# Output column names (16, appended after Run).
+BATCH_OUTPUT_COLS = [
+    "Revenue\n(€)",
+    "Cumul Sales\n(pcs)",
+    "Service\nLevel %",
+    "Missed Total\n(pcs)",
+    "Missed A\n(pcs)",
+    "Missed B\n(pcs)",
+    "Stockout\nWeeks",
+    "Init Stock\nValue (€)",
+    "Total VC\n(€)",
+    "Fixed Cost\n(€)",
+    "Net Margin\n(€)",
+    "Margin\n% of rev",
+    "Leftover Units\n(pcs)",
+    "Leftover\nValue (€)",
+    "Useful\nProd %",
+    "Reconciled\n✓/✗",
+]
+
+
+def _batch_default_rows():
+    """9 Permanent presets (Agile/Medium/Push × Drop/Flat/Growth) as starter rows."""
+    presets = [
+        ("Agile  · Drop",   "Agile",  30,  1),
+        ("Agile  · Flat",   "Agile",  100, 1),
+        ("Agile  · Growth", "Agile",  300, 5),
+        ("Medium · Drop",   "Medium", 30,  1),
+        ("Medium · Flat",   "Medium", 100, 1),
+        ("Medium · Growth", "Medium", 300, 5),
+        ("Push   · Drop",   "Push",   30,  1),
+        ("Push   · Flat",   "Push",   100, 1),
+        ("Push   · Growth", "Push",   300, 5),
+    ]
+    rows = []
+    for label, lt_name, lin_end, lin_wks in presets:
+        lt = LT_PROFILES[lt_name]
+        dist = STOCK_DIST_OPERATIONAL[lt_name]
+        cov = lt["mat_lt"] + lt["semi_lt"] + lt["fp_lt"] + lt["dist_lt"] + lt["order_freq"]
+        stock = min(100 * cov, 10000)
+        rows.append({
+            BATCH_INPUT_COLS[0]:  label,
+            BATCH_INPUT_COLS[1]:  26,
+            BATCH_INPUT_COLS[2]:  lt["mat_lt"],
+            BATCH_INPUT_COLS[3]:  lt["semi_lt"],
+            BATCH_INPUT_COLS[4]:  lt["fp_lt"],
+            BATCH_INPUT_COLS[5]:  lt["dist_lt"],
+            BATCH_INPUT_COLS[6]:  lt["order_freq"],
+            BATCH_INPUT_COLS[7]:  stock,
+            BATCH_INPUT_COLS[8]:  dist["store_pct"],
+            BATCH_INPUT_COLS[9]:  dist["wh_pct"],
+            BATCH_INPUT_COLS[10]: dist["semi_pct"],
+            BATCH_INPUT_COLS[11]: 60,
+            BATCH_INPUT_COLS[12]: True,
+            BATCH_INPUT_COLS[13]: "Linear",
+            BATCH_INPUT_COLS[14]: lin_end,
+            BATCH_INPUT_COLS[15]: lin_wks,
+            BATCH_INPUT_COLS[16]: "Steep",
+            BATCH_INPUT_COLS[17]: 100,
+            BATCH_INPUT_COLS[18]: 100,
+            BATCH_INPUT_COLS[19]: 20,
+            BATCH_INPUT_COLS[20]: 1000,
+            BATCH_INPUT_COLS[21]: 200,
+            BATCH_INPUT_COLS[22]: 45,
+        })
+    return pd.DataFrame(rows)
+
+
+def _run_one_scenario(row):
+    """Run one scenario row through the engine and return a dict of outputs."""
+    w           = int(row[BATCH_INPUT_COLS[1]])
+    mat_lt      = int(row[BATCH_INPUT_COLS[2]])
+    semi_lt     = int(row[BATCH_INPUT_COLS[3]])
+    fp_lt       = int(row[BATCH_INPUT_COLS[4]])
+    dist_lt     = int(row[BATCH_INPUT_COLS[5]])
+    freq        = int(row[BATCH_INPUT_COLS[6]])
+    total_stock = int(row[BATCH_INPUT_COLS[7]])
+    sp          = int(row[BATCH_INPUT_COLS[8]])
+    wp          = int(row[BATCH_INPUT_COLS[9]])
+    sep         = int(row[BATCH_INPUT_COLS[10]])
+    a_pct       = int(row[BATCH_INPUT_COLS[11]])
+    smart       = bool(row[BATCH_INPUT_COLS[12]])
+    shape       = str(row[BATCH_INPUT_COLS[13]])
+    lin_end     = int(row[BATCH_INPUT_COLS[14]])
+    lin_wks     = int(row[BATCH_INPUT_COLS[15]])
+    seas_sub    = str(row[BATCH_INPUT_COLS[16]])
+    seas_avg    = int(row[BATCH_INPUT_COLS[17]])
+    cap_start   = int(row[BATCH_INPUT_COLS[18]])
+    cap_ramp    = float(row[BATCH_INPUT_COLS[19]]) / 100.0
+    price       = int(row[BATCH_INPUT_COLS[20]])
+    var_cost    = int(row[BATCH_INPUT_COLS[21]])
+    fixed_pct   = float(row[BATCH_INPUT_COLS[22]]) / 100.0
+
+    init_store  = int(round(total_stock * sp / 100))
+    init_cw     = int(round(total_stock * wp / 100))
+    init_semi   = int(round(total_stock * sep / 100))
+    init_raw    = total_stock - init_store - init_cw - init_semi
+
+    if "Seasonal" in shape:
+        cd = seasonal_curve(w, seas_sub, seas_avg)
+        pc = [0.0] + list(seasonal_curve_float(w, seas_sub, BASE_FORECAST))
+    else:
+        cd = build_demand_curve(DEMAND_SHAPES[0], w, base=BASE_FORECAST,
+                                lin_end=lin_end, lin_wks=lin_wks)[1:]
+        pc = None
+
+    states = run_simulation(
+        weeks=w, init_store=init_store, init_cw=init_cw,
+        init_semi=init_semi, init_rawmat=init_raw,
+        order_freq=freq, mat_lt=mat_lt, semi_lt=semi_lt,
+        fp_lt=fp_lt, dist_lt=dist_lt,
+        cap_start=cap_start, cap_ramp=cap_ramp, base_forecast=BASE_FORECAST,
+        price=price, var_cost=var_cost, fixed_pct=fixed_pct,
+        store_a_pct=a_pct, smart_distrib=smart,
+        debug=False,
+        custom_demand=tuple([0] + cd),
+        planner_curve=tuple(pc) if pc is not None else None,
+    )
+    k = compute_kpis(states[1:], price, var_cost, fixed_pct, BASE_FORECAST, w,
+                     init_store, init_cw, init_semi, init_raw, debug=False)
+    reconciled = abs(k["pl_residual"]) < 1.0
+    return {
+        BATCH_OUTPUT_COLS[0]:  round(k["revenue"]),
+        BATCH_OUTPUT_COLS[1]:  round(k["total_sales"]),
+        BATCH_OUTPUT_COLS[2]:  round(k["svc_level"] * 100, 1),
+        BATCH_OUTPUT_COLS[3]:  round(k["total_missed"]),
+        BATCH_OUTPUT_COLS[4]:  round(k["missed_a"]),
+        BATCH_OUTPUT_COLS[5]:  round(k["missed_b"]),
+        BATCH_OUTPUT_COLS[6]:  k["stockout_weeks"],
+        BATCH_OUTPUT_COLS[7]:  round(k["init_stock_value"]),
+        BATCH_OUTPUT_COLS[8]:  round(k["var_cost"]),
+        BATCH_OUTPUT_COLS[9]:  round(k["fixed"]),
+        BATCH_OUTPUT_COLS[10]: round(k["margin"]),
+        BATCH_OUTPUT_COLS[11]: round(k["margin_pct"] * 100, 1),
+        BATCH_OUTPUT_COLS[12]: round(k["end_stock_units"] + k["end_pipe_units"]),
+        BATCH_OUTPUT_COLS[13]: round(k["leftover_value"]),
+        BATCH_OUTPUT_COLS[14]: round(k["useful_pct"], 1),
+        BATCH_OUTPUT_COLS[15]: "✓" if reconciled else "✗",
+    }
+
+
+def render_batch_ui():
+    """Main page when app_mode == 'Batch Comparison'."""
+    st.markdown("# 📊 Batch Scenario Comparison")
+    st.caption("Edit one scenario per row, then click **Run all scenarios**. "
+               "Outputs are appended as columns. Export the whole table as CSV; "
+               "paste it back into the box at the bottom to restore a saved batch.")
+
+    # --- Initialize the table ---
+    if "batch_df" not in st.session_state:
+        st.session_state.batch_df = _batch_default_rows()
+
+    # --- Column config for type-aware editing ---
+    NumberCol = st.column_config.NumberColumn
+    SelectCol = st.column_config.SelectboxColumn
+    CheckCol  = st.column_config.CheckboxColumn
+    TextCol   = st.column_config.TextColumn
+    col_config = {
+        BATCH_INPUT_COLS[0]:  TextCol(width="medium"),
+        BATCH_INPUT_COLS[1]:  NumberCol(min_value=13, max_value=52, step=1),
+        BATCH_INPUT_COLS[2]:  NumberCol(min_value=1, max_value=24, step=1),
+        BATCH_INPUT_COLS[3]:  NumberCol(min_value=1, max_value=12, step=1),
+        BATCH_INPUT_COLS[4]:  NumberCol(min_value=1, max_value=12, step=1),
+        BATCH_INPUT_COLS[5]:  NumberCol(min_value=1, max_value=12, step=1),
+        BATCH_INPUT_COLS[6]:  NumberCol(min_value=1, max_value=4, step=1),
+        BATCH_INPUT_COLS[7]:  NumberCol(min_value=0, max_value=50000, step=50),
+        BATCH_INPUT_COLS[8]:  NumberCol(min_value=0, max_value=100, step=5),
+        BATCH_INPUT_COLS[9]:  NumberCol(min_value=0, max_value=100, step=5),
+        BATCH_INPUT_COLS[10]: NumberCol(min_value=0, max_value=100, step=5),
+        BATCH_INPUT_COLS[11]: NumberCol(min_value=0, max_value=100, step=5),
+        BATCH_INPUT_COLS[12]: CheckCol(),
+        BATCH_INPUT_COLS[13]: SelectCol(options=["Linear", "Seasonal"]),
+        BATCH_INPUT_COLS[14]: NumberCol(min_value=0, max_value=1000, step=10),
+        BATCH_INPUT_COLS[15]: NumberCol(min_value=1, max_value=52, step=1),
+        BATCH_INPUT_COLS[16]: SelectCol(options=["Very Steep", "Steep", "~Flat"]),
+        BATCH_INPUT_COLS[17]: NumberCol(min_value=0, max_value=1000, step=10),
+        BATCH_INPUT_COLS[18]: NumberCol(min_value=10, max_value=1000, step=10),
+        BATCH_INPUT_COLS[19]: NumberCol(min_value=0, max_value=50, step=5),
+        BATCH_INPUT_COLS[20]: NumberCol(min_value=100, max_value=10000, step=100),
+        BATCH_INPUT_COLS[21]: NumberCol(min_value=10, max_value=5000, step=10),
+        BATCH_INPUT_COLS[22]: NumberCol(min_value=0, max_value=100, step=5),
+    }
+    # Mark output columns read-only with formatting
+    for c in BATCH_OUTPUT_COLS:
+        if "✓" in c:
+            col_config[c] = TextCol(disabled=True)
+        else:
+            col_config[c] = NumberCol(disabled=True)
+
+    # --- Top action buttons ---
+    b1, b2, b3 = st.columns([1, 1, 1])
+    if b1.button("🔄 Reset to 9-preset baseline", use_container_width=True):
+        st.session_state.batch_df = _batch_default_rows()
+        st.rerun()
+    if b2.button("➕ Duplicate last row", use_container_width=True):
+        df = st.session_state.batch_df
+        if len(df) > 0:
+            new_row = df.iloc[-1].copy()
+            label_col = BATCH_INPUT_COLS[0]
+            new_row[label_col] = str(new_row[label_col]) + " (copy)"
+            st.session_state.batch_df = pd.concat([df, pd.DataFrame([new_row])],
+                                                  ignore_index=True)
+            st.rerun()
+    run_clicked = b3.button("▶️ Run all scenarios", use_container_width=True, type="primary")
+
+    # --- Editable table ---
+    # Strip output columns from the editor view (they're filled by Run only)
+    input_only_df = st.session_state.batch_df[BATCH_INPUT_COLS].copy()
+    edited = st.data_editor(
+        input_only_df,
+        column_config={k: v for k, v in col_config.items() if k in BATCH_INPUT_COLS},
+        num_rows="dynamic",
+        use_container_width=True,
+        height=min(600, 40 + len(input_only_df) * 35),
+        key="batch_editor",
+    )
+    # Persist edits to session state
+    st.session_state.batch_df = edited.copy()
+
+    # --- Run ---
+    if run_clicked:
+        results = []
+        progress = st.progress(0.0, text="Running scenarios…")
+        total = len(edited)
+        for i, (_, row) in enumerate(edited.iterrows()):
+            try:
+                out = _run_one_scenario(row)
+            except Exception as e:
+                out = {c: ("FAIL" if "✓" in c else None) for c in BATCH_OUTPUT_COLS}
+                out[BATCH_OUTPUT_COLS[15]] = f"✗ {str(e)[:30]}"
+            results.append(out)
+            progress.progress((i + 1) / max(total, 1), text=f"Running scenario {i+1}/{total}…")
+        progress.empty()
+        results_df = pd.DataFrame(results)
+        st.session_state.batch_results = pd.concat([edited.reset_index(drop=True),
+                                                     results_df.reset_index(drop=True)], axis=1)
+
+    # --- Results display + export ---
+    if "batch_results" in st.session_state:
+        st.markdown("### Results")
+        st.dataframe(
+            st.session_state.batch_results,
+            use_container_width=True,
+            height=min(600, 40 + len(st.session_state.batch_results) * 35),
+            column_config=col_config,
+        )
+
+        # CSV export (inputs + outputs together — fully reproducible)
+        csv_text = st.session_state.batch_results.to_csv(index=False)
+        st.download_button(
+            "📥 Download CSV (inputs + outputs)",
+            data=csv_text,
+            file_name=f"sc_batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+        )
+
+    # --- Paste-back loader ---
+    st.markdown("---")
+    with st.expander("📋 Paste a previously-saved batch CSV to restore the table"):
+        st.caption("Paste the contents of a downloaded CSV here (input columns are picked "
+                   "up; output columns are ignored and recomputed when you click Run).")
+        pasted = st.text_area("CSV content", height=160, key="batch_paste_area",
+                              placeholder="Scenario Label,Sim Weeks,Material LT (wk),…")
+        if st.button("Load from pasted CSV"):
+            try:
+                loaded = pd.read_csv(io.StringIO(pasted))
+                # Keep only the recognized input columns; fill missing with defaults
+                defaults = _batch_default_rows().iloc[0]
+                for c in BATCH_INPUT_COLS:
+                    if c not in loaded.columns:
+                        loaded[c] = defaults[c]
+                st.session_state.batch_df = loaded[BATCH_INPUT_COLS].copy()
+                if "batch_results" in st.session_state:
+                    del st.session_state["batch_results"]
+                st.success(f"Loaded {len(loaded)} scenarios. Click 'Run all scenarios' to compute outputs.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to parse CSV: {e}")
+
+
+# ════════════════════════════════════════════════════════════════
 # SIDEBAR UI
 # ════════════════════════════════════════════════════════════════
 
 with st.sidebar:
     st.markdown("## ⚙️ Supply Chain Setup")
+    app_mode = st.radio("App mode", ["Single Scenario", "Batch Comparison"],
+                        horizontal=True, key="app_mode",
+                        help="Single = the full week-by-week simulator. "
+                             "Batch = a table of scenarios run in parallel.")
+    if app_mode == "Batch Comparison":
+        st.caption("📊 Edit per-scenario parameters in the main table. The widgets below are unused in this mode (collapse the sidebar with the « arrow if it bothers you).")
     weeks = st.select_slider("Simulation Length (weeks)", options=[13, 26, 39, 52], value=26)
 
     # --- Lead times ---
@@ -1687,6 +2011,13 @@ with st.sidebar:
 # ════════════════════════════════════════════════════════════════
 
 import altair as alt
+
+# --- Batch Comparison mode short-circuit ---
+# If user chose Batch in the sidebar, render the batch UI and stop here.
+# Single-scenario rendering (everything below) is bypassed via st.stop().
+if app_mode == "Batch Comparison":
+    render_batch_ui()  # defined below, just before this block
+    st.stop()
 
 # --- Build params dict & run simulation ---
 params = {
