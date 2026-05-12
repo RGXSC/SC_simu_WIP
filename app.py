@@ -1610,27 +1610,27 @@ with st.sidebar:
                "Agile 60/20/10/10, Medium 80/20/0/0, Push 100/0/0/0 · A=60%, smart ON")
 
     h1, h2, h3, h4 = st.columns([1.2, 1, 1, 1])
-    with h2: st.markdown("**Flat 100**")
-    with h3: st.markdown("**Growth →300**")
-    with h4: st.markdown("**Drop →30**")
+    with h2: st.markdown("**📉 Drop →30**")
+    with h3: st.markdown("**⚪ Flat 100**")
+    with h4: st.markdown("**📈 Growth →300**")
 
     a1, a2, a3, a4 = st.columns([1.2, 1, 1, 1])
     with a1: st.markdown("\U0001f7e2 **Agile**\n\n*LT=8, f=1*")
-    with a2: st.button("⚡", key="p_af", use_container_width=True, on_click=apply_preset, args=("Agile", "Flat"))
-    with a3: st.button("⚡", key="p_ag", use_container_width=True, on_click=apply_preset, args=("Agile", "Growth"))
-    with a4: st.button("⚡", key="p_ad", use_container_width=True, on_click=apply_preset, args=("Agile", "Drop"))
+    with a2: st.button("📉", key="p_ad", use_container_width=True, on_click=apply_preset, args=("Agile", "Drop"))
+    with a3: st.button("⚪", key="p_af", use_container_width=True, on_click=apply_preset, args=("Agile", "Flat"))
+    with a4: st.button("📈", key="p_ag", use_container_width=True, on_click=apply_preset, args=("Agile", "Growth"))
 
     m1, m2, m3, m4 = st.columns([1.2, 1, 1, 1])
     with m1: st.markdown("\U0001f7e1 **Medium**\n\n*LT=16, f=2*")
-    with m2: st.button("\U0001f536", key="p_mf", use_container_width=True, on_click=apply_preset, args=("Medium", "Flat"))
-    with m3: st.button("\U0001f536", key="p_mg", use_container_width=True, on_click=apply_preset, args=("Medium", "Growth"))
-    with m4: st.button("\U0001f536", key="p_md", use_container_width=True, on_click=apply_preset, args=("Medium", "Drop"))
+    with m2: st.button("📉", key="p_md", use_container_width=True, on_click=apply_preset, args=("Medium", "Drop"))
+    with m3: st.button("⚪", key="p_mf", use_container_width=True, on_click=apply_preset, args=("Medium", "Flat"))
+    with m4: st.button("📈", key="p_mg", use_container_width=True, on_click=apply_preset, args=("Medium", "Growth"))
 
     p1, p2, p3, p4 = st.columns([1.2, 1, 1, 1])
     with p1: st.markdown("\U0001f534 **Push**\n\n*LT=24, f=4*")
-    with p2: st.button("\U0001f9f1", key="p_pf", use_container_width=True, on_click=apply_preset, args=("Push", "Flat"))
-    with p3: st.button("\U0001f9f1", key="p_pg", use_container_width=True, on_click=apply_preset, args=("Push", "Growth"))
-    with p4: st.button("\U0001f9f1", key="p_pd", use_container_width=True, on_click=apply_preset, args=("Push", "Drop"))
+    with p2: st.button("📉", key="p_pd", use_container_width=True, on_click=apply_preset, args=("Push", "Drop"))
+    with p3: st.button("⚪", key="p_pf", use_container_width=True, on_click=apply_preset, args=("Push", "Flat"))
+    with p4: st.button("📈", key="p_pg", use_container_width=True, on_click=apply_preset, args=("Push", "Growth"))
 
     # --- Quick scenarios: seasonal grid (3 LT × 3 seasonal averages, all Steep) ---
     st.markdown("### \U0001f30a Quick Scenarios — Seasonal (Steep)")
@@ -1641,35 +1641,35 @@ with st.sidebar:
                "Distributions: Agile 40/20/10/30, Medium 70/20/10/0, Push 100/0/0/0 · A=60%, smart ON")
 
     sh1, sh2, sh3, sh4 = st.columns([1.2, 1, 1, 1])
-    with sh2: st.markdown("**Avg 30**")
-    with sh3: st.markdown("**Avg 100**")
-    with sh4: st.markdown("**Avg 300**")
+    with sh2: st.markdown("**📉 Avg 30**")
+    with sh3: st.markdown("**⚪ Avg 100**")
+    with sh4: st.markdown("**📈 Avg 300**")
 
     sa1, sa2, sa3, sa4 = st.columns([1.2, 1, 1, 1])
     with sa1: st.markdown("\U0001f7e2 **Agile**")
-    with sa2: st.button("\U0001f30a", key="ps_a30",  use_container_width=True, on_click=apply_preset,
+    with sa2: st.button("📉", key="ps_a30",  use_container_width=True, on_click=apply_preset,
                         args=("Agile", "Seasonal"), kwargs={"seas_avg": 30,  "seas_sub": "Steep"})
-    with sa3: st.button("\U0001f30a", key="ps_a100", use_container_width=True, on_click=apply_preset,
+    with sa3: st.button("⚪", key="ps_a100", use_container_width=True, on_click=apply_preset,
                         args=("Agile", "Seasonal"), kwargs={"seas_avg": 100, "seas_sub": "Steep"})
-    with sa4: st.button("\U0001f30a", key="ps_a300", use_container_width=True, on_click=apply_preset,
+    with sa4: st.button("📈", key="ps_a300", use_container_width=True, on_click=apply_preset,
                         args=("Agile", "Seasonal"), kwargs={"seas_avg": 300, "seas_sub": "Steep"})
 
     sm1, sm2, sm3, sm4 = st.columns([1.2, 1, 1, 1])
     with sm1: st.markdown("\U0001f7e1 **Medium**")
-    with sm2: st.button("\U0001f30a", key="ps_m30",  use_container_width=True, on_click=apply_preset,
+    with sm2: st.button("📉", key="ps_m30",  use_container_width=True, on_click=apply_preset,
                         args=("Medium", "Seasonal"), kwargs={"seas_avg": 30,  "seas_sub": "Steep"})
-    with sm3: st.button("\U0001f30a", key="ps_m100", use_container_width=True, on_click=apply_preset,
+    with sm3: st.button("⚪", key="ps_m100", use_container_width=True, on_click=apply_preset,
                         args=("Medium", "Seasonal"), kwargs={"seas_avg": 100, "seas_sub": "Steep"})
-    with sm4: st.button("\U0001f30a", key="ps_m300", use_container_width=True, on_click=apply_preset,
+    with sm4: st.button("📈", key="ps_m300", use_container_width=True, on_click=apply_preset,
                         args=("Medium", "Seasonal"), kwargs={"seas_avg": 300, "seas_sub": "Steep"})
 
     sp1, sp2, sp3, sp4 = st.columns([1.2, 1, 1, 1])
     with sp1: st.markdown("\U0001f534 **Push**")
-    with sp2: st.button("\U0001f30a", key="ps_p30",  use_container_width=True, on_click=apply_preset,
+    with sp2: st.button("📉", key="ps_p30",  use_container_width=True, on_click=apply_preset,
                         args=("Push", "Seasonal"), kwargs={"seas_avg": 30,  "seas_sub": "Steep"})
-    with sp3: st.button("\U0001f30a", key="ps_p100", use_container_width=True, on_click=apply_preset,
+    with sp3: st.button("⚪", key="ps_p100", use_container_width=True, on_click=apply_preset,
                         args=("Push", "Seasonal"), kwargs={"seas_avg": 100, "seas_sub": "Steep"})
-    with sp4: st.button("\U0001f30a", key="ps_p300", use_container_width=True, on_click=apply_preset,
+    with sp4: st.button("📈", key="ps_p300", use_container_width=True, on_click=apply_preset,
                         args=("Push", "Seasonal"), kwargs={"seas_avg": 300, "seas_sub": "Steep"})
 
     st.caption(
