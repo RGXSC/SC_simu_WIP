@@ -52,11 +52,11 @@ VALOR_FINISHED = 1.00
 # Fixed base forecast (planner's nominal demand signal)
 BASE_FORECAST = 100
 
-# Demand shape labels (visible in the selector)
+# Demand shape labels (visible in the selector).
+# Linear unifies the old "flat / ramp up / ramp down" cases via a single
+# (final-value, transition-weeks) pair, with start always = BASE_FORECAST.
 DEMAND_SHAPES = [
-    "➡️ Flat (constant demand)",
-    "\U0001f4c8 Linear ramp then flat",
-    "\U0001f4c9 Linear drop then flat",
+    "📊 Linear (start 100 → final value)",
     "\U0001f30a Seasonal (curve profile)",
 ]
 
@@ -114,10 +114,9 @@ _DEFAULTS = {
     # "kickstart": False,  # removed in v3
     "debug_mode": False,
     "week_num": 0,
+    "lin_end": 100, "lin_wks": 1,
     "seas_sub": "Steep",
     "seas_avg": 100,
-    "lr_end": 300, "lr_wks": 5,
-    "ld_end": 30,  "ld_wks": 1,
 }
 for _k, _v in _DEFAULTS.items():
     st.session_state.setdefault(_k, _v)
@@ -166,40 +165,33 @@ def seasonal_curve_float(weeks: int, sub_shape: str, avg: float) -> list[float]:
 
 def build_demand_curve(shape: str, weeks: int, *,
                        base: int = BASE_FORECAST,
-                       lr_end: int = 300, lr_wks: int = 5,
-                       ld_end: int = 30,  ld_wks: int = 1,
+                       lin_end: int = 100, lin_wks: int = 1,
                        seas_sub: str = "Steep", seas_avg: int = 100) -> list[int]:
     """
     Return a length-(weeks+1) demand list where index 0 = 0 (W0) and indices
-    1..weeks = demand at each week. Shape is dispatched by the emoji-prefixed
-    shape string from DEMAND_SHAPES.
+    1..weeks = demand at each week.
+
+    Linear   : start at `base`, linearly reach `lin_end` over `lin_wks` weeks,
+               then hold flat at `lin_end`. If lin_end == base, the curve is
+               flat for the whole sim.
+    Seasonal : gamma curve scaled so total = seas_avg × weeks.
     """
     out = [0]
-    if "Flat" in shape:
-        out.extend([base] * weeks)
-    elif "ramp" in shape.lower():
-        for w in range(1, weeks + 1):
-            if w <= lr_wks:
-                val = base + (lr_end - base) * w / lr_wks
-            else:
-                val = lr_end
-            out.append(max(0, int(round(val))))
-    elif "drop" in shape.lower():
-        for w in range(1, weeks + 1):
-            if w <= ld_wks:
-                val = base + (ld_end - base) * w / ld_wks
-            else:
-                val = ld_end
-            out.append(max(0, int(round(val))))
-    else:  # Seasonal
+    if "Seasonal" in shape:
         out.extend(seasonal_curve(weeks, seas_sub, seas_avg))
+    else:  # Linear (covers flat/up/down via the one (lin_end, lin_wks) pair)
+        for w in range(1, weeks + 1):
+            if lin_wks > 0 and w <= lin_wks:
+                val = base + (lin_end - base) * w / lin_wks
+            else:
+                val = lin_end
+            out.append(max(0, int(round(val))))
     return out
 
 
 def recommend_initial_stock(shape: str, weeks: int, coverage: int, *,
                             base: int = BASE_FORECAST,
-                            lr_end: int = 300, lr_wks: int = 5,
-                            ld_end: int = 30,  ld_wks: int = 1,
+                            lin_end: int = 100, lin_wks: int = 1,
                             seas_sub: str = "Steep", seas_avg: int = 100) -> tuple[int, str]:
     """
     Smart initial-stock recommendation: sum of actual demand over the first
@@ -207,18 +199,17 @@ def recommend_initial_stock(shape: str, weeks: int, coverage: int, *,
     """
     n = min(coverage, weeks)
     curve = build_demand_curve(shape, weeks,
-                               base=base, lr_end=lr_end, lr_wks=lr_wks,
-                               ld_end=ld_end, ld_wks=ld_wks,
+                               base=base, lin_end=lin_end, lin_wks=lin_wks,
                                seas_sub=seas_sub, seas_avg=seas_avg)
     total = sum(curve[1:n + 1])
     if "Seasonal" in shape:
         detail = f"sum of first {n} wks of {seas_sub} curve (avg {seas_avg}/wk)"
-    elif "ramp" in shape.lower():
-        detail = f"first {n} wks of ramp curve"
-    elif "drop" in shape.lower():
-        detail = f"first {n} wks of drop curve"
+    elif lin_end == base:
+        detail = f"{base}/wk × {n} wks (flat)"
+    elif lin_end > base:
+        detail = f"first {n} wks of ramp {base}→{lin_end} over {lin_wks}wk"
     else:
-        detail = f"{base}/wk × {n} wks coverage"
+        detail = f"first {n} wks of drop {base}→{lin_end} over {lin_wks}wk"
     return int(total), detail
 
 
@@ -1424,16 +1415,18 @@ def apply_preset(lt_name: str, demand_kind: str, *,
 
     if demand_kind == "Flat":
         st.session_state["demand_shape"] = DEMAND_SHAPES[0]
+        st.session_state["lin_end"] = 100
+        st.session_state["lin_wks"] = 1
     elif demand_kind == "Growth":
-        st.session_state["demand_shape"] = DEMAND_SHAPES[1]
-        st.session_state["lr_end"] = lr_end
-        st.session_state["lr_wks"] = lr_wks
+        st.session_state["demand_shape"] = DEMAND_SHAPES[0]
+        st.session_state["lin_end"] = lr_end
+        st.session_state["lin_wks"] = lr_wks
     elif demand_kind == "Drop":
-        st.session_state["demand_shape"] = DEMAND_SHAPES[2]
-        st.session_state["ld_end"] = ld_end
-        st.session_state["ld_wks"] = ld_wks
+        st.session_state["demand_shape"] = DEMAND_SHAPES[0]
+        st.session_state["lin_end"] = ld_end
+        st.session_state["lin_wks"] = ld_wks
     elif demand_kind == "Seasonal":
-        st.session_state["demand_shape"] = DEMAND_SHAPES[3]
+        st.session_state["demand_shape"] = DEMAND_SHAPES[1]
         st.session_state["seas_sub"] = seas_sub
         st.session_state["seas_avg"] = seas_avg
 
@@ -1475,10 +1468,8 @@ with st.sidebar:
     rec_units, rec_detail = recommend_initial_stock(
         _ds, weeks, coverage,
         base=BASE_FORECAST,
-        lr_end=st.session_state.get("lr_end", 300),
-        lr_wks=st.session_state.get("lr_wks", 5),
-        ld_end=st.session_state.get("ld_end", 30),
-        ld_wks=st.session_state.get("ld_wks", 1),
+        lin_end=st.session_state.get("lin_end", 100),
+        lin_wks=st.session_state.get("lin_wks", 1),
         seas_sub=st.session_state.get("seas_sub", "Steep"),
         seas_avg=st.session_state.get("seas_avg", 100),
     )
@@ -1536,28 +1527,24 @@ with st.sidebar:
 
     # --- Demand profile ---
     st.markdown("### \U0001f4c8 Demand Profile")
-    preset_shape = st.selectbox("Demand shape", DEMAND_SHAPES, key="demand_shape")
+    preset_shape = st.radio("Demand family", DEMAND_SHAPES, key="demand_shape", horizontal=True)
     bf = BASE_FORECAST
     demand_description = ""
 
-    if "Flat" in preset_shape:
-        init_demand = build_demand_curve(preset_shape, weeks, base=bf)
-        demand_description = f"Flat {bf}/wk for {weeks} wks"
-
-    elif "ramp" in preset_shape.lower():
-        end_dem = st.slider("Target demand (pcs/wk)", min_value=bf, max_value=1000, step=10, key="lr_end")
-        ramp_wks = st.slider("Ramp duration (weeks)", min_value=1, max_value=weeks, step=1, key="lr_wks")
-        init_demand = build_demand_curve(preset_shape, weeks, base=bf, lr_end=end_dem, lr_wks=ramp_wks)
-        demand_description = f"Ramp {bf}→{end_dem} in {ramp_wks}wk"
-
-    elif "drop" in preset_shape.lower():
-        drop_dem = st.slider("Floor demand (pcs/wk)", min_value=0, max_value=bf, step=10, key="ld_end")
-        drop_wks = st.slider("Drop duration (weeks)", min_value=1, max_value=weeks, step=1, key="ld_wks")
-        init_demand = build_demand_curve(preset_shape, weeks, base=bf, ld_end=drop_dem, ld_wks=drop_wks)
-        demand_description = f"Drop {bf}→{drop_dem} in {drop_wks}wk"
+    if "Linear" in preset_shape:
+        st.caption(f"Start always at {bf}/wk. Adjust the final value (set = {bf} for flat).")
+        end_dem = st.slider("Final demand (pcs/wk)", min_value=0, max_value=1000, step=10, key="lin_end")
+        trans_wks = st.slider("Transition duration (weeks)", min_value=1, max_value=weeks, step=1, key="lin_wks")
+        init_demand = build_demand_curve(preset_shape, weeks, base=bf, lin_end=end_dem, lin_wks=trans_wks)
+        if end_dem == bf:
+            demand_description = f"Flat {bf}/wk for {weeks} wks"
+        elif end_dem > bf:
+            demand_description = f"Ramp {bf}→{end_dem} in {trans_wks}wk"
+        else:
+            demand_description = f"Drop {bf}→{end_dem} in {trans_wks}wk"
 
     else:  # Seasonal
-        seas_sub = st.radio("Profile shape", ["Very Steep", "Steep", "~Flat"],
+        seas_sub = st.radio("Curve shape", ["Very Steep", "Steep", "~Flat"],
                             key="seas_sub", horizontal=True)
         seas_avg = st.slider("Average weekly demand", min_value=0, max_value=1000, step=10, key="seas_avg")
         init_demand = build_demand_curve(preset_shape, weeks, base=bf,
@@ -2010,37 +1997,77 @@ if debug_mode:
             st.success("All reconciliation checks passed.")
 
 
-# --- Week-by-week data table (collapsed by default) ---
+# --- Week-by-week data table (collapsed by default; downstream → upstream) ---
 with st.expander("\U0001f4ca Detailed Week-by-Week Data", expanded=False):
     table_data = []
     for s in states:
         wk_rev    = s['sales'] * price
         wk_vc     = s.get('cost_mat', 0) + s.get('cost_semi', 0) + s.get('cost_fp', 0)
         wk_margin = wk_rev - wk_vc
+        pf = s.get('planner_factor')
         table_data.append({
-            'Week':     s['week'],
-            'Demand':   s['demand'],   'Dem A':  s['demand_a'], 'Dem B':  s['demand_b'],
-            'Sales':    s['sales'],    'Sales A': s['sales_a'], 'Sales B': s['sales_b'],
-            'Missed':   s['missed'],   'Miss A': s['missed_a'], 'Miss B': s['missed_b'],
-            'Stk A':    s['store_a'],  'Stk B':  s['store_b'],
-            'Alloc A':  s['alloc_a'],  'Alloc B': s['alloc_b'],
-            'CW Wait':  s.get('cw_stock', 0),   'CW Pipe':  s.get('cw_shipped', 0),
-            'FP Pipe':  round(sum(s.get('fp_pipe', [])), 1),
-            'Semi Wait': s.get('semi_stock', 0), 'Semi Pipe': round(sum(s.get('semi_pipe', [])), 1),
-            'RM Wait':  s.get('raw_mat_stock', 0), 'Mat Pipe': round(sum(s.get('mat_pipe', [])), 1),
-            'WIP':      s.get('wip_total', 0),
-            'Order':    s['order'],    'Pending': s['pending'],
-            'Sup Cap':  s.get('supplier_cap', 0),
-            'Revenue':  round(wk_rev),
-            'Cost RM':   round(s.get('cost_mat', 0)),
-            'Cost Semi': round(s.get('cost_semi', 0)),
-            'Cost FP':   round(s.get('cost_fp', 0)),
-            'Tot VC':   round(wk_vc),
-            'Margin':   round(wk_margin),
+            'Week':        s['week'],
+
+            # Planner state
+            'Forecast':    s.get('forecast', 0),
+            'Cover Tgt':   s.get('target_sup', 0),
+            'Planner f':   round(pf, 2) if pf is not None else None,
+
+            # Demand / Sales / Misses
+            'Demand':      s['demand'],   'Dem A':   s['demand_a'],   'Dem B':   s['demand_b'],
+            'Sales':       s['sales'],    'Sales A': s['sales_a'],    'Sales B': s['sales_b'],
+            'Missed':      s['missed'],   'Miss A':  s['missed_a'],   'Miss B':  s['missed_b'],
+
+            # Stores
+            'Store A':     s['store_a'],  'Store B': s['store_b'],
+            'Alloc A':     s['alloc_a'],  'Alloc B': s['alloc_b'],
+
+            # CW → Store stage
+            'CW Buffer':   s.get('cw_stock', 0),
+            'CW→Store':    s.get('cw_shipped', 0),
+            'CW→Store pipe': round(sum(s.get('dist_pipe_a', [])) + sum(s.get('dist_pipe_b', [])), 1),
+            'Ship BL':     s.get('ship_backlog', 0),
+            'Ord Ship':    s.get('order_ship', 0),
+
+            # Semi → FP stage
+            'Semi→FP pipe': round(sum(s.get('fp_pipe', [])), 1),
+            'FP Proc':     s.get('fp_input', 0),
+            'FP BL':       s.get('fp_backlog', 0),
+            'Ord FP':      s.get('order_fp', 0),
+
+            # RM → Semi stage
+            'Semi Buffer': s.get('semi_stock', 0),
+            'RM→Semi pipe': round(sum(s.get('semi_pipe', [])), 1),
+            'Semi Proc':   s.get('semi_input', 0),
+            'Semi BL':     s.get('semi_backlog', 0),
+            'Ord Semi':    s.get('order_semi', 0),
+
+            # Supplier → RM stage
+            'RM Buffer':   s.get('raw_mat_stock', 0),
+            'Supp→RM pipe': round(sum(s.get('mat_pipe', [])), 1),
+            'Sup Ship':    s.get('supplier_shipped', 0),
+            'Sup BL':      s.get('backlog', 0),
+            'Ord Sup':     s['order'],
+            'Sup Cap':     s.get('supplier_cap', 0),
+
+            # Totals
+            'WIP total':   s.get('wip_total', 0),
+
+            # Financials
+            'Revenue':     round(wk_rev),
+            'Cost RM':     round(s.get('cost_mat', 0)),
+            'Cost Semi':   round(s.get('cost_semi', 0)),
+            'Cost FP':     round(s.get('cost_fp', 0)),
+            'Tot VC':      round(wk_vc),
+            'Margin':      round(wk_margin),
         })
     st.dataframe(pd.DataFrame(table_data), use_container_width=True, height=500)
-    st.caption("**CW Wait** = stock sitting in CW buffer. **CW Pipe** = units shipped from CW toward stores this week. "
-               "**Costs** are booked when units ENTER each stage (RM 50%, Semi +25%, FP +25%).")
+    st.caption(
+        "Reads left-to-right downstream → upstream. **Buffer** = stock waiting at that stage. "
+        "**pipe** = units in transit (sum). **Proc / Ship / Push** = units that moved this week. "
+        "**BL** = planner's backlog of pushes-still-to-do at that stage. **Ord** = planner's order placed at this review. "
+        "Costs are booked when units ENTER each stage (RM 50%, Semi +25%, FP +25%)."
+    )
 
 
 # --- Save scenario + comparison ---
