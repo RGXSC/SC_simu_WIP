@@ -1632,7 +1632,7 @@ def render_batch_ui():
     CheckCol  = st.column_config.CheckboxColumn
     TextCol   = st.column_config.TextColumn
     col_config = {
-        BATCH_INPUT_COLS[0]:  TextCol(width="medium"),
+        BATCH_INPUT_COLS[0]:  TextCol(width="medium", pinned=True),
         BATCH_INPUT_COLS[1]:  NumberCol(min_value=13, max_value=52, step=1),
         BATCH_INPUT_COLS[2]:  NumberCol(min_value=1, max_value=24, step=1),
         BATCH_INPUT_COLS[3]:  NumberCol(min_value=1, max_value=12, step=1),
