@@ -1663,24 +1663,59 @@ def render_batch_ui():
         else:
             col_config[c] = NumberCol(disabled=True)
 
+    # --- Helpers: pull the latest edited dataframe out of the data_editor's
+    #     internal state without mutating the source. This is what avoids
+    #     the "scroll jumps to the left and edit is lost" issue: by NOT
+    #     writing `edited` back into st.session_state.batch_df on every
+    #     keystroke, the source DataFrame stays stable and the editor's
+    #     scroll/cursor position is preserved across reruns.
+    def _apply_editor_state(source_df):
+        """Return source_df with the editor's pending edits applied (adds,
+        edits, deletes), using the diff dict stored at
+        st.session_state['batch_editor']."""
+        df = source_df.copy().reset_index(drop=True)
+        edits = st.session_state.get("batch_editor", {}) or {}
+        for idx_key, changes in (edits.get("edited_rows") or {}).items():
+            idx = int(idx_key)
+            for col, val in changes.items():
+                if 0 <= idx < len(df):
+                    df.at[idx, col] = val
+        for row in (edits.get("added_rows") or []):
+            df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+        for idx in sorted([int(i) for i in (edits.get("deleted_rows") or [])], reverse=True):
+            if 0 <= idx < len(df):
+                df = df.drop(idx).reset_index(drop=True)
+        return df
+
+    def _reset_batch():
+        st.session_state.batch_df = _batch_default_rows()
+        st.session_state.pop("batch_editor", None)
+        st.session_state.pop("batch_results", None)
+
+    def _duplicate_last_row():
+        current = _apply_editor_state(st.session_state.batch_df[BATCH_INPUT_COLS])
+        if len(current) == 0:
+            return
+        new_row = current.iloc[-1].copy()
+        label_col = BATCH_INPUT_COLS[0]
+        new_row[label_col] = str(new_row[label_col]) + " (copy)"
+        st.session_state.batch_df = pd.concat(
+            [current, pd.DataFrame([new_row])], ignore_index=True
+        )
+        st.session_state.pop("batch_editor", None)
+
     # --- Top action buttons ---
     b1, b2, b3 = st.columns([1, 1, 1])
-    if b1.button("🔄 Reset to 9-preset baseline", use_container_width=True):
-        st.session_state.batch_df = _batch_default_rows()
-        st.rerun()
-    if b2.button("➕ Duplicate last row", use_container_width=True):
-        df = st.session_state.batch_df
-        if len(df) > 0:
-            new_row = df.iloc[-1].copy()
-            label_col = BATCH_INPUT_COLS[0]
-            new_row[label_col] = str(new_row[label_col]) + " (copy)"
-            st.session_state.batch_df = pd.concat([df, pd.DataFrame([new_row])],
-                                                  ignore_index=True)
-            st.rerun()
+    b1.button("🔄 Reset to 9-preset baseline", use_container_width=True, on_click=_reset_batch)
+    b2.button("➕ Duplicate last row", use_container_width=True, on_click=_duplicate_last_row)
     run_clicked = b3.button("▶️ Run all scenarios", use_container_width=True, type="primary")
 
     # --- Editable table ---
-    # Strip output columns from the editor view (they're filled by Run only)
+    # Strip output columns from the editor view (they're filled by Run only).
+    # Critical: do NOT write `edited` back to batch_df. The editor's `key`
+    # parameter persists edits in st.session_state["batch_editor"] across
+    # reruns; we only commit them back to batch_df on explicit user actions
+    # (Reset, Duplicate, Run, Paste-back).
     input_only_df = st.session_state.batch_df[BATCH_INPUT_COLS].copy()
     edited = st.data_editor(
         input_only_df,
@@ -1690,8 +1725,6 @@ def render_batch_ui():
         height=min(600, 40 + len(input_only_df) * 35),
         key="batch_editor",
     )
-    # Persist edits to session state
-    st.session_state.batch_df = edited.copy()
 
     # --- Run ---
     if run_clicked:
@@ -1746,8 +1779,10 @@ def render_batch_ui():
                     if c not in loaded.columns:
                         loaded[c] = defaults[c]
                 st.session_state.batch_df = loaded[BATCH_INPUT_COLS].copy()
-                if "batch_results" in st.session_state:
-                    del st.session_state["batch_results"]
+                # Clear stale editor edits AND old results so the loaded
+                # CSV is what the editor displays.
+                st.session_state.pop("batch_editor", None)
+                st.session_state.pop("batch_results", None)
                 st.success(f"Loaded {len(loaded)} scenarios. Click 'Run all scenarios' to compute outputs.")
                 st.rerun()
             except Exception as e:
