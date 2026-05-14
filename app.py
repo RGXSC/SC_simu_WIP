@@ -2250,55 +2250,106 @@ if st.session_state.get("show_calcs", False):
         cov_ship_local = dist_lt + order_freq
 
         if s['week'] == 0:
-            st.markdown("**Week 0** — initial state, no engine logic runs yet. "
-                        "All stocks/buffers are pre-populated; pipes are empty; "
-                        "no orders, no processing, no sales.")
+            st.markdown(
+                "**Week 0 is the initial state — no engine logic has run yet.** "
+                "All stocks and buffers sit at their pre-configured values, the pipes "
+                "(in-transit slots) are empty, the supplier has no backlog, and no "
+                "sales have happened. The first sale, the first order, and the first "
+                "processing all start at Week 1. Click `+1 ▶` to step into the live "
+                "simulation."
+            )
         else:
             # 1. DEMAND & SALES
-            st.markdown("#### 1. Demand & store sales")
-            st.markdown(
-                f"- Total demand this week: **{s['demand']:.0f}**\n"
-                f"- Demand A = demand × A% = {s['demand']:.0f} × {store_a_pct}% = **{s['demand_a']:.0f}**\n"
-                f"- Demand B = demand × (1−A%) = **{s['demand_b']:.0f}**"
-            )
+            st.markdown("#### 1. Demand and store sales")
             arr_a = s['dist_arr_a']; arr_b = s['dist_arr_b']
             store_a_start = (prev['store_a'] if prev else 0)
             store_b_start = (prev['store_b'] if prev else 0)
+            avail_a = store_a_start + arr_a
+            avail_b = store_b_start + arr_b
+            a_state = "fully met" if s['missed_a'] < 0.5 else "partially met"
+            b_state = "fully met" if s['missed_b'] < 0.5 else "partially met"
             st.markdown(
-                f"- Store A: start {store_a_start:.0f} + arrivals {arr_a:.0f} = **{store_a_start + arr_a:.0f}** available; "
-                f"sold min({s['demand_a']:.0f}, {store_a_start + arr_a:.0f}) = **{s['sales_a']:.0f}**, "
-                f"missed **{s['missed_a']:.0f}**, end **{s['store_a']:.0f}**\n"
-                f"- Store B: start {store_b_start:.0f} + arrivals {arr_b:.0f} = **{store_b_start + arr_b:.0f}** available; "
-                f"sold **{s['sales_b']:.0f}**, missed **{s['missed_b']:.0f}**, end **{s['store_b']:.0f}**"
+                f"This week's total customer demand is **{s['demand']:.0f} units**. "
+                f"With Store A taking {store_a_pct}% of demand and Store B the remaining "
+                f"{100 - store_a_pct}%, that breaks down to **{s['demand_a']:.0f} units "
+                f"for A** and **{s['demand_b']:.0f} units for B**.\n\n"
+                f"**Store A** started the week with {store_a_start:.0f} units. "
+                f"{arr_a:.0f} units arrived from the Distribution pipe this morning, so "
+                f"A had **{avail_a:.0f} available** to sell. Demand was therefore "
+                f"{a_state}: **{s['sales_a']:.0f} sold**, "
+                f"**{s['missed_a']:.0f} missed**, ending the week at "
+                f"**{s['store_a']:.0f} units**.\n\n"
+                f"**Store B** started with {store_b_start:.0f}, received {arr_b:.0f}, "
+                f"so had **{avail_b:.0f} available**. Demand was {b_state}: "
+                f"**{s['sales_b']:.0f} sold**, **{s['missed_b']:.0f} missed**, ending at "
+                f"**{s['store_b']:.0f}**."
             )
 
             # 2. ARRIVALS → BUFFERS
-            st.markdown("#### 2. Pipe-front arrivals → upstream buffers")
+            st.markdown("#### 2. Upstream-pipe arrivals into buffers")
             rm_prev = prev['raw_mat_stock'] if prev else 0
             sm_prev = prev['semi_stock'] if prev else 0
             cw_prev = prev['cw_stock'] if prev else 0
             st.markdown(
-                f"- Material pipe arrival: {s['mat_arr']:.0f} → RM buffer: {rm_prev:.0f} + {s['mat_arr']:.0f} = **{rm_prev + s['mat_arr']:.0f}** (before processing)\n"
-                f"- Semi pipe arrival: {s['semi_arr']:.0f} → Semi buffer: {sm_prev:.0f} + {s['semi_arr']:.0f} = **{sm_prev + s['semi_arr']:.0f}** (before processing)\n"
-                f"- FP pipe arrival: {s['fp_arr']:.0f} → CW buffer: {cw_prev:.0f} + {s['fp_arr']:.0f} = **{cw_prev + s['fp_arr']:.0f}** (before push)"
+                f"Every pipe advances one slot per week, so this week's arrivals are "
+                f"whatever sat at the very front of each pipe at the end of last week. "
+                f"At the **Material → RM** boundary, **{s['mat_arr']:.0f} units arrived** "
+                f"and flowed into the RM buffer (which therefore goes from "
+                f"{rm_prev:.0f} to **{rm_prev + s['mat_arr']:.0f}** before any "
+                f"processing happens). Similarly, **{s['semi_arr']:.0f} units arrived "
+                f"at the Semi buffer** (now at {sm_prev + s['semi_arr']:.0f}), and "
+                f"**{s['fp_arr']:.0f} units arrived at the CW buffer** (now at "
+                f"{cw_prev + s['fp_arr']:.0f}). These freshly-arrived units are "
+                f"available for the planner's review and the processing steps below."
             )
 
             # 3. PLANNER REVIEW (if review week)
             calc = s.get('planner_calc')
             if calc is not None:
-                st.markdown(f"#### 3. Planner review (this is review week {s['week']})")
+                st.markdown(f"#### 3. Planner review — *this is a review week (every {order_freq} wk)*")
                 pf = s.get('planner_factor')
-                if pf is not None:
-                    if seasonal := planner_curve is not None:
-                        st.markdown(
-                            f"- Planner factor (locked at first review): **f = {pf:.3f}**\n"
-                            f"- Targets are computed as Σ planner_curve[w+1..w+cov_x] × f"
-                        )
-                    else:
-                        st.markdown(f"- Forecast (flat mode): ff = **{s['forecast']:.0f}**/wk")
+                seasonal_mode = planner_curve is not None
+                if seasonal_mode and pf is not None:
+                    st.markdown(
+                        f"Because the demand profile is **seasonal**, the planner knows "
+                        f"the curve shape but had to discover the actual amplitude. The "
+                        f"locked adjustment factor is **f = {pf:.2f}×**, meaning actual "
+                        f"demand has turned out to be {pf:.2f} times what the planner "
+                        f"initially assumed (avg = {BASE_FORECAST}/wk). Therefore each "
+                        f"target below is computed as **Σ planner_curve[w+1..w+cov_x] "
+                        f"× {pf:.2f}** — the sum of the next cov_x weeks of the scaled "
+                        f"seasonal curve."
+                    )
                 else:
-                    st.markdown(f"- Forecast (flat mode): ff = **{s['forecast']:.0f}**/wk")
+                    st.markdown(
+                        f"Because the demand profile is **linear/flat**, the planner's "
+                        f"forecast is simply the latest observed demand: "
+                        f"**ff = {s['forecast']:.0f}/wk**. Each target is therefore "
+                        f"computed as **ff × coverage**, where coverage = lead time "
+                        f"from that stage to the store + ordering frequency."
+                    )
 
+                # Per-stage narrative for the supplier
+                cd_sup = calc['sup']
+                if cd_sup['final_order'] > 0:
+                    why_sup = (f"Because **existing inventory ({cd_sup['existing']:.0f}) "
+                              f"is below the target ({cd_sup['target']:.0f})**, the "
+                              f"pooled gap is {cd_sup['pooled_order']:.0f}. ")
+                    if cd_sup['ps_gap'] > cd_sup['pooled_order']:
+                        why_sup += (f"The per-store check is even larger "
+                                   f"({cd_sup['ps_gap']:.0f}) — one of the stores "
+                                   f"would have starved under the pooled view, so we "
+                                   f"raise the order to **{cd_sup['final_order']:.0f}** "
+                                   f"units.")
+                    else:
+                        why_sup += f"The supplier order is therefore **{cd_sup['final_order']:.0f}** units."
+                else:
+                    why_sup = (f"Because **existing ({cd_sup['existing']:.0f}) already "
+                              f"covers the target ({cd_sup['target']:.0f})**, no "
+                              f"supplier order is placed this week.")
+                st.markdown(f"**Supplier:** {why_sup}")
+
+                # Per-stage table for at-a-glance comparison
                 rows = []
                 for stage_key, stage_label, cov_val in [
                     ('sup',  'Supplier',         cov_sup_local),
@@ -2307,62 +2358,121 @@ if st.session_state.get("show_calcs", False):
                     ('ship', 'Ship (CW→Store)',  cov_ship_local),
                 ]:
                     cd = calc[stage_key]
+                    gap = cd['target'] - cd['existing']
                     rows.append({
-                        'Stage':    stage_label,
-                        'Coverage': f"{cov_val} wk",
-                        'Target':   f"{cd['target']:.0f}",
-                        'Existing': f"{cd['existing']:.0f}",
-                        'Pooled order': f"{cd['pooled_order']:.0f}",
+                        'Stage':         stage_label,
+                        'Coverage (wk)': cov_val,
+                        'Target':        f"{cd['target']:.0f}",
+                        'Existing':      f"{cd['existing']:.0f}",
+                        'Gap (T−E)':     f"{gap:.0f}",
+                        'Pooled order':  f"{cd['pooled_order']:.0f}",
                         'Per-store gap': f"{cd['ps_gap']:.0f}",
-                        'Final order': f"**{cd['final_order']:.0f}**",
+                        'Final order':   f"**{cd['final_order']:.0f}**",
                     })
-                st.markdown("Order = max(pooled-gap, per-store-gap):")
+                st.caption("Final order = max(pooled-gap, per-store-gap). The per-store check "
+                           "fires when one store would starve even though aggregate stock looks fine.")
                 st.table(pd.DataFrame(rows).set_index('Stage'))
             else:
-                st.markdown(f"#### 3. Planner review — *not a review week (next review at W{((s['week'] // order_freq) + 1) * order_freq})*")
+                next_review = ((s['week'] // order_freq) + 1) * order_freq
+                st.markdown(
+                    f"#### 3. Planner review — *not a review week*\n\n"
+                    f"The planner only places orders every **{order_freq}** week(s); "
+                    f"the next review is at **W{next_review}**. Between reviews the "
+                    f"existing backlogs keep draining as the factory executes them, "
+                    f"but no new orders are added."
+                )
 
             # 4. SUPPLIER SHIP
             st.markdown("#### 4. Supplier ship")
-            st.markdown(
-                f"- Supplier capacity this week: cap_start × (1 + pn × ramp) = **{s['supplier_cap']:.0f}**/wk\n"
-                f"- Backlog (pb) before ship: {prev.get('backlog', 0) if prev else 0:.0f} + this week's order {s['order']:.0f} = "
-                f"{(prev.get('backlog', 0) if prev else 0) + s['order']:.0f}\n"
-                f"- Shipped this week: min(pb, cap) = **{s['supplier_shipped']:.0f}**\n"
-                f"- pb after ship: **{s['backlog']:.0f}**"
-            )
+            pb_before = (prev.get('backlog', 0) if prev else 0) + s['order']
+            if s['supplier_shipped'] > 0:
+                st.markdown(
+                    f"The supplier's capacity this week is **{s['supplier_cap']:.0f} pcs/wk** "
+                    f"(base {cap_start} ramped by the linear +{int(cap_ramp*100)}%/wk "
+                    f"that started the week after the first order was placed). "
+                    f"After today's planner order, the supplier backlog stands at "
+                    f"**{pb_before:.0f}** units. The supplier ships "
+                    f"**min({pb_before:.0f}, {s['supplier_cap']:.0f}) = "
+                    f"{s['supplier_shipped']:.0f}** units into the Material pipe; "
+                    f"the backlog ends the week at **{s['backlog']:.0f}**."
+                )
+            else:
+                st.markdown(
+                    f"The supplier has no backlog to ship this week "
+                    f"(pb = {pb_before:.0f}). Capacity is still "
+                    f"{s['supplier_cap']:.0f}/wk but is idle."
+                )
 
-            # 5. SEMI / FP processing
-            st.markdown("#### 5. Internal processing (capacity-limited, against backlogs)")
+            # 5. INTERNAL PROCESSING
+            st.markdown("#### 5. Internal processing (RM → Semi → FP)")
+            semi_bl_before = (prev.get('semi_backlog', 0) if prev else 0) + (calc['semi']['final_order'] if calc else 0)
+            fp_bl_before   = (prev.get('fp_backlog', 0) if prev else 0)   + (calc['fp']['final_order']   if calc else 0)
+            rm_now = s['raw_mat_before_prod']
+            semi_now = sm_prev + s['semi_arr']
+            si = s['semi_input']; fi = s['fp_input']
             st.markdown(
-                f"- **Semi (RM→Semi):** semi_cap = **{s['semi_cap']:.0f}**, "
-                f"semi_backlog before = {(prev.get('semi_backlog', 0) if prev else 0) + (calc['semi']['final_order'] if calc else 0):.0f}, "
-                f"raw_mat available = {s['raw_mat_before_prod']:.0f} → "
-                f"si = ceil(min(raw_mat, cap, backlog)) = **{s['semi_input']:.0f}**\n"
-                f"- **FP (Semi→FP):** fp_cap = **{s['fp_cap']:.0f}**, "
-                f"fp_backlog before = {(prev.get('fp_backlog', 0) if prev else 0) + (calc['fp']['final_order'] if calc else 0):.0f}, "
-                f"semi available = {sm_prev + s['semi_arr']:.0f} → "
-                f"fi = **{s['fp_input']:.0f}**"
+                f"**RM → Semi.** The Semi line's weekly capacity is "
+                f"**{s['semi_cap']:.0f}**, the planner's outstanding Semi push order "
+                f"(semi_backlog) is **{semi_bl_before:.0f}**, and there are "
+                f"**{rm_now:.0f}** units of raw material on hand. The factory therefore "
+                f"processes **min(RM, cap, backlog) = {si:.0f}** units — these leave the "
+                f"RM buffer and enter the Semi pipe, where they will travel for "
+                f"{semi_lt} week(s) before landing in the Semi buffer."
+            )
+            st.markdown(
+                f"**Semi → FP.** The FP line's weekly capacity is **{s['fp_cap']:.0f}**, "
+                f"the planner's FP backlog is **{fp_bl_before:.0f}**, and there are "
+                f"**{semi_now:.0f}** units of semi-finished goods available. So "
+                f"**fi = min(Semi, cap, fp_backlog) = {fi:.0f}** units move into the FP "
+                f"pipe and will arrive at the CW buffer in {fp_lt} week(s)."
             )
 
             # 6. CW PUSH
-            st.markdown("#### 6. CW → Stores push (no capacity limit — logistics)")
+            st.markdown("#### 6. CW → Stores push *(no capacity limit — pure logistics)*")
             cw_avail = cw_prev + s['fp_arr']
             ship_bl_before = (prev.get('ship_backlog', 0) if prev else 0) + (calc['ship']['final_order'] if calc else 0)
-            st.markdown(
-                f"- cw available = {cw_avail:.0f}, ship_backlog = {ship_bl_before:.0f} → "
-                f"ship_out = min(cw, ship_backlog) = **{s['cw_shipped']:.0f}**\n"
-                f"- Smart allocation between stores: **A gets {s['alloc_a']:.0f}**, **B gets {s['alloc_b']:.0f}**"
-            )
+            ship_out = s['cw_shipped']
+            if ship_out > 0:
+                st.markdown(
+                    f"There are **{cw_avail:.0f} units in CW** and the planner's "
+                    f"ship_backlog stands at **{ship_bl_before:.0f}**. CW push is "
+                    f"uncapped, so the warehouse pushes **min(CW, ship_backlog) = "
+                    f"{ship_out:.0f}** units toward the stores. Smart distribution "
+                    f"allocates them by demand share and per-store cover, prioritising "
+                    f"whichever store would otherwise starve first — this week "
+                    f"**{s['alloc_a']:.0f} go to A** and **{s['alloc_b']:.0f} go to B**. "
+                    f"They enter the Distribution pipe and will arrive at the stores "
+                    f"in {dist_lt} week(s)."
+                )
+            else:
+                st.markdown(
+                    f"CW has **{cw_avail:.0f}** units on hand and ship_backlog is "
+                    f"**{ship_bl_before:.0f}**. With at least one of those at zero, "
+                    f"nothing is pushed this week."
+                )
 
-            # 7. PIPE UPDATE & COSTS
-            st.markdown("#### 7. Pipe update + cost booking")
+            # 7. PIPE UPDATE & COST BOOKING
+            st.markdown("#### 7. Pipe shift and cost booking")
             st.markdown(
-                f"- All pipes shift left by 1 (oldest position becomes 'just arrived'); new entries "
-                f"appended at the right end with this week's outflows (shipped, si, fi, alloc).\n"
-                f"- Cost booking on entry to each stage:\n"
-                f"  - cost_RM = shipped × VC × 50% = {s['supplier_shipped']:.0f} × {var_cost} × 0.5 = **€{s['cost_mat']:,.0f}**\n"
-                f"  - cost_Semi = si × VC × 25% = {s['semi_input']:.0f} × {var_cost} × 0.25 = **€{s['cost_semi']:,.0f}**\n"
-                f"  - cost_FP = fi × VC × 25% = {s['fp_input']:.0f} × {var_cost} × 0.25 = **€{s['cost_fp']:,.0f}**"
+                f"At the end of the week, every pipe shifts left by one slot: the "
+                f"front-of-pipe units (which 'arrived' at the start of this week) "
+                f"have already been absorbed into the next buffer, and the back-of-pipe "
+                f"slot receives this week's freshly-pushed units. So the Material pipe "
+                f"now gains the **{s['supplier_shipped']:.0f}** units the supplier just "
+                f"shipped, the Semi pipe gains **{si:.0f}**, the FP pipe gains "
+                f"**{fi:.0f}**, and the Distribution pipes gain **{s['alloc_a']:.0f}** "
+                f"(to A) and **{s['alloc_b']:.0f}** (to B)."
+            )
+            st.markdown(
+                f"**Costs are booked the moment units enter each stage** (no anticipation, "
+                f"no double-counting), valued at the cumulative cost-to-stage:\n\n"
+                f"- Raw-material cost: {s['supplier_shipped']:.0f} units × €{var_cost} × 50% = **€{s['cost_mat']:,.0f}**\n"
+                f"- Semi processing cost (+25%): {si:.0f} × €{var_cost} × 25% = **€{s['cost_semi']:,.0f}**\n"
+                f"- Finished-goods cost (+25%): {fi:.0f} × €{var_cost} × 25% = **€{s['cost_fp']:,.0f}**\n\n"
+                f"These three lines feed the cumulative Total VC in the end-of-sim P&L. "
+                f"Note that the entire €{var_cost} cost of a unit is booked across its "
+                f"three stage transitions (50% + 25% + 25% = 100%), so the system never "
+                f"double-counts a unit's cost."
             )
 
 
