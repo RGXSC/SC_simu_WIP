@@ -399,6 +399,7 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
         'pending': 0, 'backlog': 0,
         'semi_backlog': 0, 'fp_backlog': 0, 'ship_backlog': 0,
         'target_sup': 0, 'planner_factor': None, 'planner_factor_locked': False,
+        'planner_calc': None,
         'wip_total': 0,
         # W0 has no production costs — initial stock is valued separately
         'cost_mat': 0.0, 'cost_semi': 0.0, 'cost_fp': 0.0,
@@ -523,6 +524,10 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
             od_fp   = math.ceil(max(0, tgt_fp   - existing_fp))
             od_ship = math.ceil(max(0, tgt_ship - existing_ship))
 
+            # Snapshot of pooled-only orders (for debug display)
+            pooled_od = {'sup': od_sup, 'semi': od_semi, 'fp': od_fp, 'ship': od_ship}
+            ps_gaps = {'sup': 0.0, 'semi': 0.0, 'fp': 0.0, 'ship': 0.0}
+
             # Per-store gap adjustment: pooled targets can miss the case where
             # one store starves while another has surplus. With smart distribution
             # the common upstream pool will be allocated by demand share, so we
@@ -546,16 +551,40 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
                 pool_sup  = (sum(mat_pipe) + raw_mat + sum(semi_pipe) + semi
                            + sum(fp_pipe) + cw + pb)
 
-                od_ship = max(od_ship, math.ceil(max(0, _ps_gap(cov_ship, pool_ship) - ship_backlog)))
-                od_fp   = max(od_fp,   math.ceil(max(0, _ps_gap(cov_fp,   pool_fp)   - fp_backlog)))
-                od_semi = max(od_semi, math.ceil(max(0, _ps_gap(cov_semi, pool_semi) - semi_backlog)))
-                od_sup  = max(od_sup,  math.ceil(max(0, _ps_gap(cov_sup,  pool_sup)  - pb)))
+                od_ship_smart = math.ceil(max(0, _ps_gap(cov_ship, pool_ship) - ship_backlog))
+                od_fp_smart   = math.ceil(max(0, _ps_gap(cov_fp,   pool_fp)   - fp_backlog))
+                od_semi_smart = math.ceil(max(0, _ps_gap(cov_semi, pool_semi) - semi_backlog))
+                od_sup_smart  = math.ceil(max(0, _ps_gap(cov_sup,  pool_sup)  - pb))
+                ps_gaps = {'sup': od_sup_smart, 'semi': od_semi_smart,
+                           'fp': od_fp_smart, 'ship': od_ship_smart}
+                od_ship = max(od_ship, od_ship_smart)
+                od_fp   = max(od_fp,   od_fp_smart)
+                od_semi = max(od_semi, od_semi_smart)
+                od_sup  = max(od_sup,  od_sup_smart)
 
             co            += od_sup
             pb            += od_sup
             semi_backlog  += od_semi
             fp_backlog    += od_fp
             ship_backlog  += od_ship
+
+            # Snapshot for the Debug calculations expander
+            s['planner_calc'] = {
+                'sup':  {'target': tgt_sup,  'existing': existing_sup,
+                         'pooled_order': pooled_od['sup'],  'ps_gap': ps_gaps['sup'],
+                         'final_order': od_sup},
+                'semi': {'target': tgt_semi, 'existing': existing_semi,
+                         'pooled_order': pooled_od['semi'], 'ps_gap': ps_gaps['semi'],
+                         'final_order': od_semi},
+                'fp':   {'target': tgt_fp,   'existing': existing_fp,
+                         'pooled_order': pooled_od['fp'],   'ps_gap': ps_gaps['fp'],
+                         'final_order': od_fp},
+                'ship': {'target': tgt_ship, 'existing': existing_ship,
+                         'pooled_order': pooled_od['ship'], 'ps_gap': ps_gaps['ship'],
+                         'final_order': od_ship},
+            }
+        else:
+            s['planner_calc'] = None
         s['order']      = round(od_sup, 0)   # 'order' = supplier order (legacy field name)
         s['order_semi'] = round(od_semi, 0)
         s['order_fp']   = round(od_fp, 0)
@@ -1962,6 +1991,14 @@ with st.sidebar:
     # push policy, and reconciliation runs silently every simulation.
     debug_mode = False
 
+    # --- Show-your-work toggle: spells out the per-week math under the diagram ---
+    st.markdown("---")
+    show_calcs = st.toggle("🧪 Show calculations under diagram",
+                           key="show_calcs",
+                           help="When ON, an expander appears under the supply-chain "
+                                "diagram with the explicit math for the current week — "
+                                "forecast, per-stage targets, capacity, processing, costs.")
+
     # --- Quick scenarios: permanent grid (3 LT × 3 demand) ---
     st.markdown("---")
     st.markdown("### \U0001f3af Quick Scenarios — Permanent")
@@ -2200,6 +2237,133 @@ if _pf is not None:
     )
 
 st.components.v1.html(make_sc_html(state, params), height=_viz_h, scrolling=False)
+
+
+# --- Show-calculations expander (when toggle is ON) ---
+if st.session_state.get("show_calcs", False):
+    with st.expander(f"🧪 Calculations for week {state['week']} — show your work", expanded=True):
+        s = state
+        prev = states[week - 1] if week > 0 else None
+        cov_sup_local  = phys_lt + order_freq
+        cov_semi_local = semi_lt + fp_lt + dist_lt + order_freq
+        cov_fp_local   = fp_lt + dist_lt + order_freq
+        cov_ship_local = dist_lt + order_freq
+
+        if s['week'] == 0:
+            st.markdown("**Week 0** — initial state, no engine logic runs yet. "
+                        "All stocks/buffers are pre-populated; pipes are empty; "
+                        "no orders, no processing, no sales.")
+        else:
+            # 1. DEMAND & SALES
+            st.markdown("#### 1. Demand & store sales")
+            st.markdown(
+                f"- Total demand this week: **{s['demand']:.0f}**\n"
+                f"- Demand A = demand × A% = {s['demand']:.0f} × {store_a_pct}% = **{s['demand_a']:.0f}**\n"
+                f"- Demand B = demand × (1−A%) = **{s['demand_b']:.0f}**"
+            )
+            arr_a = s['dist_arr_a']; arr_b = s['dist_arr_b']
+            store_a_start = (prev['store_a'] if prev else 0)
+            store_b_start = (prev['store_b'] if prev else 0)
+            st.markdown(
+                f"- Store A: start {store_a_start:.0f} + arrivals {arr_a:.0f} = **{store_a_start + arr_a:.0f}** available; "
+                f"sold min({s['demand_a']:.0f}, {store_a_start + arr_a:.0f}) = **{s['sales_a']:.0f}**, "
+                f"missed **{s['missed_a']:.0f}**, end **{s['store_a']:.0f}**\n"
+                f"- Store B: start {store_b_start:.0f} + arrivals {arr_b:.0f} = **{store_b_start + arr_b:.0f}** available; "
+                f"sold **{s['sales_b']:.0f}**, missed **{s['missed_b']:.0f}**, end **{s['store_b']:.0f}**"
+            )
+
+            # 2. ARRIVALS → BUFFERS
+            st.markdown("#### 2. Pipe-front arrivals → upstream buffers")
+            rm_prev = prev['raw_mat_stock'] if prev else 0
+            sm_prev = prev['semi_stock'] if prev else 0
+            cw_prev = prev['cw_stock'] if prev else 0
+            st.markdown(
+                f"- Material pipe arrival: {s['mat_arr']:.0f} → RM buffer: {rm_prev:.0f} + {s['mat_arr']:.0f} = **{rm_prev + s['mat_arr']:.0f}** (before processing)\n"
+                f"- Semi pipe arrival: {s['semi_arr']:.0f} → Semi buffer: {sm_prev:.0f} + {s['semi_arr']:.0f} = **{sm_prev + s['semi_arr']:.0f}** (before processing)\n"
+                f"- FP pipe arrival: {s['fp_arr']:.0f} → CW buffer: {cw_prev:.0f} + {s['fp_arr']:.0f} = **{cw_prev + s['fp_arr']:.0f}** (before push)"
+            )
+
+            # 3. PLANNER REVIEW (if review week)
+            calc = s.get('planner_calc')
+            if calc is not None:
+                st.markdown(f"#### 3. Planner review (this is review week {s['week']})")
+                pf = s.get('planner_factor')
+                if pf is not None:
+                    if seasonal := planner_curve is not None:
+                        st.markdown(
+                            f"- Planner factor (locked at first review): **f = {pf:.3f}**\n"
+                            f"- Targets are computed as Σ planner_curve[w+1..w+cov_x] × f"
+                        )
+                    else:
+                        st.markdown(f"- Forecast (flat mode): ff = **{s['forecast']:.0f}**/wk")
+                else:
+                    st.markdown(f"- Forecast (flat mode): ff = **{s['forecast']:.0f}**/wk")
+
+                rows = []
+                for stage_key, stage_label, cov_val in [
+                    ('sup',  'Supplier',         cov_sup_local),
+                    ('semi', 'Semi (RM→Semi)',   cov_semi_local),
+                    ('fp',   'FP (Semi→FP)',     cov_fp_local),
+                    ('ship', 'Ship (CW→Store)',  cov_ship_local),
+                ]:
+                    cd = calc[stage_key]
+                    rows.append({
+                        'Stage':    stage_label,
+                        'Coverage': f"{cov_val} wk",
+                        'Target':   f"{cd['target']:.0f}",
+                        'Existing': f"{cd['existing']:.0f}",
+                        'Pooled order': f"{cd['pooled_order']:.0f}",
+                        'Per-store gap': f"{cd['ps_gap']:.0f}",
+                        'Final order': f"**{cd['final_order']:.0f}**",
+                    })
+                st.markdown("Order = max(pooled-gap, per-store-gap):")
+                st.table(pd.DataFrame(rows).set_index('Stage'))
+            else:
+                st.markdown(f"#### 3. Planner review — *not a review week (next review at W{((s['week'] // order_freq) + 1) * order_freq})*")
+
+            # 4. SUPPLIER SHIP
+            st.markdown("#### 4. Supplier ship")
+            st.markdown(
+                f"- Supplier capacity this week: cap_start × (1 + pn × ramp) = **{s['supplier_cap']:.0f}**/wk\n"
+                f"- Backlog (pb) before ship: {prev.get('backlog', 0) if prev else 0:.0f} + this week's order {s['order']:.0f} = "
+                f"{(prev.get('backlog', 0) if prev else 0) + s['order']:.0f}\n"
+                f"- Shipped this week: min(pb, cap) = **{s['supplier_shipped']:.0f}**\n"
+                f"- pb after ship: **{s['backlog']:.0f}**"
+            )
+
+            # 5. SEMI / FP processing
+            st.markdown("#### 5. Internal processing (capacity-limited, against backlogs)")
+            st.markdown(
+                f"- **Semi (RM→Semi):** semi_cap = **{s['semi_cap']:.0f}**, "
+                f"semi_backlog before = {(prev.get('semi_backlog', 0) if prev else 0) + (calc['semi']['final_order'] if calc else 0):.0f}, "
+                f"raw_mat available = {s['raw_mat_before_prod']:.0f} → "
+                f"si = ceil(min(raw_mat, cap, backlog)) = **{s['semi_input']:.0f}**\n"
+                f"- **FP (Semi→FP):** fp_cap = **{s['fp_cap']:.0f}**, "
+                f"fp_backlog before = {(prev.get('fp_backlog', 0) if prev else 0) + (calc['fp']['final_order'] if calc else 0):.0f}, "
+                f"semi available = {sm_prev + s['semi_arr']:.0f} → "
+                f"fi = **{s['fp_input']:.0f}**"
+            )
+
+            # 6. CW PUSH
+            st.markdown("#### 6. CW → Stores push (no capacity limit — logistics)")
+            cw_avail = cw_prev + s['fp_arr']
+            ship_bl_before = (prev.get('ship_backlog', 0) if prev else 0) + (calc['ship']['final_order'] if calc else 0)
+            st.markdown(
+                f"- cw available = {cw_avail:.0f}, ship_backlog = {ship_bl_before:.0f} → "
+                f"ship_out = min(cw, ship_backlog) = **{s['cw_shipped']:.0f}**\n"
+                f"- Smart allocation between stores: **A gets {s['alloc_a']:.0f}**, **B gets {s['alloc_b']:.0f}**"
+            )
+
+            # 7. PIPE UPDATE & COSTS
+            st.markdown("#### 7. Pipe update + cost booking")
+            st.markdown(
+                f"- All pipes shift left by 1 (oldest position becomes 'just arrived'); new entries "
+                f"appended at the right end with this week's outflows (shipped, si, fi, alloc).\n"
+                f"- Cost booking on entry to each stage:\n"
+                f"  - cost_RM = shipped × VC × 50% = {s['supplier_shipped']:.0f} × {var_cost} × 0.5 = **€{s['cost_mat']:,.0f}**\n"
+                f"  - cost_Semi = si × VC × 25% = {s['semi_input']:.0f} × {var_cost} × 0.25 = **€{s['cost_semi']:,.0f}**\n"
+                f"  - cost_FP = fi × VC × 25% = {s['fp_input']:.0f} × {var_cost} × 0.25 = **€{s['cost_fp']:,.0f}**"
+            )
 
 
 # --- Charts (collapsed by default) ---
