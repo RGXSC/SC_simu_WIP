@@ -1914,28 +1914,40 @@ with st.sidebar:
     if _sep > 100 - _sp - st.session_state.get("wh_pct", 0):
         st.session_state["semi_pct"] = max(0, 100 - _sp - st.session_state.get("wh_pct", 0))
 
-    # Layout matches the Lead Times 2×2 grid (Material/Finishing on top,
-    # Semi-Fin/Store on bottom). Material % is the auto-balancing remainder
-    # so the four numbers always sum to 100. Order/naming aligned with the
-    # Lead Times stage labels for consistency across the app.
+    # Layout exactly mirrors the Lead Times 2×2 grid so the four labels
+    # line up cell-for-cell:
+    #     Material  (auto = 100 − others)  |  Finishing  (input)
+    #     Semi-Fin  (input)                 |  Store      (input)
+    # Material % is computed live each render (not a keyed widget — those
+    # cache and don't refresh visually when other inputs change).
     sc1, sc2 = st.columns(2)
-    with sc1:
-        finishing_pct = st.number_input("Finishing %", min_value=0, max_value=100, step=5,
-                                        key="wh_pct",
-                                        help="% of total initial stock held in the Finishing-stage "
-                                             "buffer (CW = central warehouse).")
-        semi_pct = st.number_input("Semi-Fin %", min_value=0, max_value=max(0, 100 - finishing_pct),
-                                   step=5, key="semi_pct")
-    with sc2:
-        store_pct = st.number_input("Store %", min_value=0,
-                                    max_value=max(0, 100 - finishing_pct - semi_pct),
-                                    step=5, key="store_pct",
-                                    help="% of total initial stock pre-positioned at the two stores "
-                                         "(always split 50/50 between A and B).")
-        # Material % is the implicit remainder.
-        material_pct = max(0, 100 - finishing_pct - semi_pct - store_pct)
-        st.number_input("Material %  (= 100 − others)", value=material_pct, step=1,
-                        disabled=True, key="_material_pct_display")
+    finishing_pct = sc2.number_input(
+        "Finishing %", min_value=0, max_value=100, step=5, key="wh_pct",
+        help="% of total initial stock held in the Finishing-stage buffer (CW = central warehouse).",
+    )
+    semi_pct = sc1.number_input(
+        "Semi-Fin %", min_value=0, max_value=max(0, 100 - finishing_pct), step=5,
+        key="semi_pct",
+    )
+    store_pct = sc2.number_input(
+        "Store %", min_value=0,
+        max_value=max(0, 100 - finishing_pct - semi_pct), step=5, key="store_pct",
+        help="% of total initial stock pre-positioned at the two stores (always 50/50 between A and B).",
+    )
+    material_pct = max(0, 100 - finishing_pct - semi_pct - store_pct)
+    # Display Material % as a live read-only field at the top-left position
+    # of the grid (mirroring the Lead Times Material slot). We use markdown
+    # rather than st.number_input(disabled=True, key=...) because keyed
+    # disabled widgets cache and don't refresh when siblings change.
+    sc1.markdown(
+        f'<div style="background:#fafbfc;border:1px solid #dde3ed;border-radius:4px;'
+        f'padding:7px 10px;margin-top:1.7em;">'
+        f'<div style="font-size:13px;color:#5a6a7e;">Material %  '
+        f'<span style="color:#a8b4c4;font-size:11px;">(= 100 − others)</span></div>'
+        f'<div style="font-size:18px;font-weight:700;color:#1a2a40;">{material_pct}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
     # Engine-side variables (names unchanged to preserve all internal refs)
     warehouse_pct = finishing_pct          # legacy alias
