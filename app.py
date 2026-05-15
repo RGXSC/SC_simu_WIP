@@ -1914,28 +1914,45 @@ with st.sidebar:
     if _sep > 100 - _sp - st.session_state.get("wh_pct", 0):
         st.session_state["semi_pct"] = max(0, 100 - _sp - st.session_state.get("wh_pct", 0))
 
-    sc1, sc2, sc3 = st.columns(3)
+    # Layout matches the Lead Times 2×2 grid (Material/Finishing on top,
+    # Semi-Fin/Store on bottom). Material % is the auto-balancing remainder
+    # so the four numbers always sum to 100. Order/naming aligned with the
+    # Lead Times stage labels for consistency across the app.
+    sc1, sc2 = st.columns(2)
     with sc1:
-        store_pct = st.number_input("Store %", min_value=0, max_value=100, step=5, key="store_pct")
+        finishing_pct = st.number_input("Finishing %", min_value=0, max_value=100, step=5,
+                                        key="wh_pct",
+                                        help="% of total initial stock held in the Finishing-stage "
+                                             "buffer (CW = central warehouse).")
+        semi_pct = st.number_input("Semi-Fin %", min_value=0, max_value=max(0, 100 - finishing_pct),
+                                   step=5, key="semi_pct")
     with sc2:
-        wh_max = max(0, 100 - store_pct)
-        warehouse_pct = st.number_input("Warehouse %", min_value=0, max_value=wh_max, step=5, key="wh_pct")
-    with sc3:
-        semi_max = max(0, 100 - store_pct - warehouse_pct)
-        semi_pct = st.number_input("Semi-Fin %", min_value=0, max_value=semi_max, step=5, key="semi_pct")
-    rawmat_pct = 100 - store_pct - warehouse_pct - semi_pct
+        store_pct = st.number_input("Store %", min_value=0,
+                                    max_value=max(0, 100 - finishing_pct - semi_pct),
+                                    step=5, key="store_pct",
+                                    help="% of total initial stock pre-positioned at the two stores "
+                                         "(always split 50/50 between A and B).")
+        # Material % is the implicit remainder.
+        material_pct = max(0, 100 - finishing_pct - semi_pct - store_pct)
+        st.number_input("Material %  (= 100 − others)", value=material_pct, step=1,
+                        disabled=True, key="_material_pct_display")
+
+    # Engine-side variables (names unchanged to preserve all internal refs)
+    warehouse_pct = finishing_pct          # legacy alias
+    rawmat_pct    = material_pct
 
     init_store  = int(round(total_stock * store_pct / 100))
-    init_cw     = int(round(total_stock * warehouse_pct / 100))
+    init_cw     = int(round(total_stock * finishing_pct / 100))
     init_semi   = int(round(total_stock * semi_pct / 100))
     init_rawmat = total_stock - init_store - init_cw - init_semi
 
     st.markdown(
         f'<div style="background:#f0f2f5;border-radius:8px;padding:8px 12px;font-size:13px;line-height:1.8;">'
-        f'<b>Store:</b> {init_store} ({store_pct}%) @ 100% <i>(always 50/50 initial)</i> | '
-        f'<b>WH:</b> {init_cw} ({warehouse_pct}%) @ 100% | '
-        f'<b>Semi:</b> {init_semi} ({semi_pct}%) @ 75% | '
-        f'<b>RM:</b> {init_rawmat} ({rawmat_pct}%) @ 50%</div>',
+        f'<b>Material:</b> {init_rawmat} ({material_pct}%) @ 50% | '
+        f'<b>Semi-Fin:</b> {init_semi} ({semi_pct}%) @ 75% | '
+        f'<b>Finishing:</b> {init_cw} ({finishing_pct}%) @ 100% | '
+        f'<b>Store:</b> {init_store} ({store_pct}%) @ 100% <i>(always 50/50 initial)</i>'
+        f'</div>',
         unsafe_allow_html=True,
     )
 
@@ -2810,32 +2827,32 @@ with st.expander("\U0001f4ca Detailed Week-by-Week Data", expanded=False):
             'Alloc A':     s['alloc_a'],  'Alloc B': s['alloc_b'],
 
             # CW → Store stage
-            'CW Buffer':   s.get('cw_stock', 0),
-            'CW→Store':    s.get('cw_shipped', 0),
-            'CW→Store pipe': round(sum(s.get('dist_pipe_a', [])) + sum(s.get('dist_pipe_b', [])), 1),
-            'Ship BL':     s.get('ship_backlog', 0),
-            'Ord Ship':    s.get('order_ship', 0),
+            'Finishing Buffer': s.get('cw_stock', 0),
+            'Distribution Push': s.get('cw_shipped', 0),
+            'Distribution pipe': round(sum(s.get('dist_pipe_a', [])) + sum(s.get('dist_pipe_b', [])), 1),
+            'Distribution BL':   s.get('ship_backlog', 0),
+            'Ord Distribution':  s.get('order_ship', 0),
 
             # Semi → FP stage
-            'Semi→FP pipe': round(sum(s.get('fp_pipe', [])), 1),
-            'FP Proc':     s.get('fp_input', 0),
-            'FP BL':       s.get('fp_backlog', 0),
-            'Ord FP':      s.get('order_fp', 0),
+            'Finishing pipe': round(sum(s.get('fp_pipe', [])), 1),
+            'Finishing Proc': s.get('fp_input', 0),
+            'Finishing BL':   s.get('fp_backlog', 0),
+            'Ord Finishing':  s.get('order_fp', 0),
 
             # RM → Semi stage
-            'Semi Buffer': s.get('semi_stock', 0),
-            'RM→Semi pipe': round(sum(s.get('semi_pipe', [])), 1),
-            'Semi Proc':   s.get('semi_input', 0),
-            'Semi BL':     s.get('semi_backlog', 0),
-            'Ord Semi':    s.get('order_semi', 0),
+            'Semi-Fin Buffer': s.get('semi_stock', 0),
+            'Semi-Fin pipe':   round(sum(s.get('semi_pipe', [])), 1),
+            'Semi-Fin Proc':   s.get('semi_input', 0),
+            'Semi-Fin BL':     s.get('semi_backlog', 0),
+            'Ord Semi-Fin':    s.get('order_semi', 0),
 
             # Supplier → RM stage
-            'RM Buffer':   s.get('raw_mat_stock', 0),
-            'Supp→RM pipe': round(sum(s.get('mat_pipe', [])), 1),
-            'Sup Ship':    s.get('supplier_shipped', 0),
-            'Sup BL':      s.get('backlog', 0),
-            'Ord Sup':     s['order'],
-            'Sup Cap':     s.get('supplier_cap', 0),
+            'Material Buffer': s.get('raw_mat_stock', 0),
+            'Material pipe':   round(sum(s.get('mat_pipe', [])), 1),
+            'Material Ship':   s.get('supplier_shipped', 0),
+            'Material BL':     s.get('backlog', 0),
+            'Ord Material':    s['order'],
+            'Material Cap':    s.get('supplier_cap', 0),
 
             # Totals
             'WIP total':   s.get('wip_total', 0),
