@@ -1816,39 +1816,37 @@ def render_batch_ui():
             column_config=col_config,
         )
 
-        # CSV export (inputs + outputs together — fully reproducible)
-        csv_text = st.session_state.batch_results.to_csv(index=False)
+        # XLSX export (inputs + outputs together — fully reproducible)
+        xlsx_buf = io.BytesIO()
+        with pd.ExcelWriter(xlsx_buf, engine="openpyxl") as xw:
+            st.session_state.batch_results.to_excel(xw, index=False, sheet_name="Batch")
         st.download_button(
-            "📥 Download CSV (inputs + outputs)",
-            data=csv_text,
-            file_name=f"sc_batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv",
+            "📥 Download results as Excel (inputs + outputs)",
+            data=xlsx_buf.getvalue(),
+            file_name=f"sc_batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-    # --- Paste-back loader ---
+    # --- Upload-back loader (Excel) ---
     st.markdown("---")
-    with st.expander("📋 Paste a previously-saved batch CSV to restore the table"):
-        st.caption("Paste the contents of a downloaded CSV here (input columns are picked "
-                   "up; output columns are ignored and recomputed when you click Run).")
-        pasted = st.text_area("CSV content", height=160, key="batch_paste_area",
-                              placeholder="Scenario Label,Sim Weeks,Material LT (wk),…")
-        if st.button("Load from pasted CSV"):
+    with st.expander("📤 Upload a previously-saved batch Excel file to restore the table"):
+        st.caption("Upload the .xlsx file you downloaded earlier. Input columns are "
+                   "picked up; output columns are ignored and recomputed when you click Run.")
+        uploaded = st.file_uploader("Choose an .xlsx file", type=["xlsx"], key="batch_upload")
+        if uploaded is not None and st.button("Load from uploaded file"):
             try:
-                loaded = pd.read_csv(io.StringIO(pasted))
-                # Keep only the recognized input columns; fill missing with defaults
+                loaded = pd.read_excel(uploaded, sheet_name=0)
                 defaults = _batch_default_rows().iloc[0]
                 for c in BATCH_INPUT_COLS:
                     if c not in loaded.columns:
                         loaded[c] = defaults[c]
                 st.session_state.batch_df = loaded[BATCH_INPUT_COLS].copy()
-                # Clear stale editor edits AND old results so the loaded
-                # CSV is what the editor displays.
                 st.session_state.pop("batch_editor", None)
                 st.session_state.pop("batch_results", None)
                 st.success(f"Loaded {len(loaded)} scenarios. Click 'Run all scenarios' to compute outputs.")
                 st.rerun()
             except Exception as e:
-                st.error(f"Failed to parse CSV: {e}")
+                st.error(f"Failed to parse Excel file: {e}")
 
 
 # ════════════════════════════════════════════════════════════════
