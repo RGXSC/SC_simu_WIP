@@ -1918,34 +1918,32 @@ with st.sidebar:
     # line up cell-for-cell:
     #     Material  (auto = 100 − others)  |  Finishing  (input)
     #     Semi-Fin  (input)                 |  Store      (input)
-    # Material % is computed live each render (not a keyed widget — those
-    # cache and don't refresh visually when other inputs change).
+    # Material % is rendered into a TOP-of-column-1 placeholder LAST so it
+    # reflects the latest values of the other three inputs every render.
     sc1, sc2 = st.columns(2)
-    finishing_pct = sc2.number_input(
+    material_slot = sc1.empty()                                            # top-left
+    finishing_pct = sc2.number_input(                                       # top-right
         "Finishing %", min_value=0, max_value=100, step=5, key="wh_pct",
         help="% of total initial stock held in the Finishing-stage buffer (CW = central warehouse).",
     )
-    semi_pct = sc1.number_input(
+    semi_pct = sc1.number_input(                                            # bottom-left
         "Semi-Fin %", min_value=0, max_value=max(0, 100 - finishing_pct), step=5,
         key="semi_pct",
     )
-    store_pct = sc2.number_input(
+    store_pct = sc2.number_input(                                           # bottom-right
         "Store %", min_value=0,
         max_value=max(0, 100 - finishing_pct - semi_pct), step=5, key="store_pct",
         help="% of total initial stock pre-positioned at the two stores (always 50/50 between A and B).",
     )
     material_pct = max(0, 100 - finishing_pct - semi_pct - store_pct)
-    # Display Material % as a live read-only field at the top-left position
-    # of the grid (mirroring the Lead Times Material slot). We use markdown
-    # rather than st.number_input(disabled=True, key=...) because keyed
-    # disabled widgets cache and don't refresh when siblings change.
-    sc1.markdown(
-        f'<div style="background:#fafbfc;border:1px solid #dde3ed;border-radius:4px;'
-        f'padding:7px 10px;margin-top:1.7em;">'
-        f'<div style="font-size:13px;color:#5a6a7e;">Material %  '
-        f'<span style="color:#a8b4c4;font-size:11px;">(= 100 − others)</span></div>'
-        f'<div style="font-size:18px;font-weight:700;color:#1a2a40;">{material_pct}</div>'
-        f'</div>',
+    # Restyled to closely match the look of a Streamlit number_input:
+    # same border, padding, font size, no bold. Just read-only.
+    material_slot.markdown(
+        f'<div style="font-size:14px;color:rgb(38,39,48);margin-bottom:0.25rem;">'
+        f'Material %  <span style="color:#a8b4c4;font-size:11px;">(= 100 − others)</span></div>'
+        f'<div style="border:1px solid rgba(49,51,63,0.2);border-radius:0.5rem;'
+        f'padding:0.45rem 0.75rem;font-size:14px;color:rgb(38,39,48);background:#fafbfc;">'
+        f'{material_pct}</div>',
         unsafe_allow_html=True,
     )
 
