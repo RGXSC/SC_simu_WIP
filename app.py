@@ -2452,6 +2452,71 @@ if st.session_state.get("show_calcs", False):
                 st.caption("Final order = max(pooled-gap, per-store-gap). The per-store check "
                            "fires when one store would starve even though aggregate stock looks fine.")
                 st.table(pd.DataFrame(rows).set_index('Stage'))
+
+                # Breakdown of what each 'Existing' value comprises.
+                # Reading prev = states[week-1] gives us the START-OF-WEEK
+                # backlog values (= end of last week's), which is what the
+                # planner sees when reviewing at step 4 — BEFORE this week's
+                # new order is added to pb / the per-stage backlogs.
+                stores_now = s['store_a'] + s['store_b']
+                # mat_pipe etc. as the planner sees them at step 4: position 0
+                # has been cleared at step 1 and its content folded into raw_mat
+                # at step 3; positions 1..end are unchanged from end of last week.
+                # Equivalent shorthand: stage downstream WIP = end-of-last-week
+                # stage WIP minus the front slot that just transitioned to buffer.
+                # The cleanest way to display this is via end-of-this-week values,
+                # which equal pre-step-1 values for the unaffected positions.
+                pb_pre  = (prev.get('backlog', 0)      if prev else 0)
+                sb_pre  = (prev.get('semi_backlog', 0) if prev else 0)
+                fb_pre  = (prev.get('fp_backlog', 0)   if prev else 0)
+                shb_pre = (prev.get('ship_backlog', 0) if prev else 0)
+                # WIP downstream of each stage, AS THE PLANNER SEES IT at step 4
+                # (= aggregate of every unit the planner counts toward 'existing'
+                # excluding stores and the stage's own backlog).
+                wip_to_store_sup  = (calc['sup']['existing']  - stores_now - pb_pre)
+                wip_to_store_semi = (calc['semi']['existing'] - stores_now - sb_pre)
+                wip_to_store_fp   = (calc['fp']['existing']   - stores_now - fb_pre)
+                wip_to_store_ship = (calc['ship']['existing'] - stores_now - shb_pre)
+                st.markdown(
+                    "**Why these 'Existing' values?** Each stage's existing inventory "
+                    "is everything that's already in motion toward the customer **plus** "
+                    "any of that stage's own orders that the planner placed earlier but "
+                    "the factory hasn't yet executed (= the stage's own backlog at the "
+                    "start of this week, BEFORE this week's new order is added). "
+                    "Numerically, for this week:"
+                )
+                breakdown_rows = [
+                    {'Stage': 'Supplier',         'Stores': f"{stores_now:.0f}",
+                     'Pipes + buffers downstream': f"{wip_to_store_sup:.0f}",
+                     "This stage's pre-order backlog": f"{pb_pre:.0f} (pb)",
+                     'Total Existing':            f"**{calc['sup']['existing']:.0f}**"},
+                    {'Stage': 'Semi (RM→Semi)',   'Stores': f"{stores_now:.0f}",
+                     'Pipes + buffers downstream': f"{wip_to_store_semi:.0f}",
+                     "This stage's pre-order backlog": f"{sb_pre:.0f} (semi_bl)",
+                     'Total Existing':            f"**{calc['semi']['existing']:.0f}**"},
+                    {'Stage': 'FP (Semi→FP)',     'Stores': f"{stores_now:.0f}",
+                     'Pipes + buffers downstream': f"{wip_to_store_fp:.0f}",
+                     "This stage's pre-order backlog": f"{fb_pre:.0f} (fp_bl)",
+                     'Total Existing':            f"**{calc['fp']['existing']:.0f}**"},
+                    {'Stage': 'Ship (CW→Store)',  'Stores': f"{stores_now:.0f}",
+                     'Pipes + buffers downstream': f"{wip_to_store_ship:.0f}",
+                     "This stage's pre-order backlog": f"{shb_pre:.0f} (ship_bl)",
+                     'Total Existing':            f"**{calc['ship']['existing']:.0f}**"},
+                ]
+                st.table(pd.DataFrame(breakdown_rows).set_index('Stage'))
+                st.caption(
+                    "⚠️ Note on the **Supplier backlog** column above (pb) vs the "
+                    "**Backlog** value shown in the diagram's top info bar: "
+                    f"the diagram shows the END-OF-WEEK pb (= **{s.get('backlog', 0):.0f}**), "
+                    "which INCLUDES this week's new order ("
+                    f"+{calc['sup']['final_order']:.0f}) and EXCLUDES this week's supplier "
+                    f"ship (−{s.get('supplier_shipped', 0):.0f}). The 'Existing' calculation "
+                    f"above uses the start-of-week pb ({pb_pre:.0f}) — the value before the "
+                    "new order is added. Reconciliation: "
+                    f"start-of-week pb ({pb_pre:.0f}) + order ({calc['sup']['final_order']:.0f}) "
+                    f"− shipped ({s.get('supplier_shipped', 0):.0f}) = end-of-week pb "
+                    f"({s.get('backlog', 0):.0f}). Same logic for the other 3 backlogs."
+                )
             else:
                 next_review = ((s['week'] // order_freq) + 1) * order_freq
                 st.markdown(
