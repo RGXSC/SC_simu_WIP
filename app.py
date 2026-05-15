@@ -2329,17 +2329,64 @@ if st.session_state.get("show_calcs", False):
                         f"locked adjustment factor is **f = {pf:.2f}×**, meaning actual "
                         f"demand has turned out to be {pf:.2f} times what the planner "
                         f"initially assumed (avg = {BASE_FORECAST}/wk). Therefore each "
-                        f"target below is computed as **Σ planner_curve[w+1..w+cov_x] "
+                        f"target below is computed as **Σ planner_curve[w+1 … w+cov_x] "
                         f"× {pf:.2f}** — the sum of the next cov_x weeks of the scaled "
                         f"seasonal curve."
                     )
+                    # Concrete numerical derivation for the supplier target.
+                    # We pick the supplier as the example because it has the
+                    # longest lookahead and therefore is the most opaque to
+                    # readers. The other 3 stages follow the same pattern with
+                    # shorter windows.
+                    pc = params.get('planner_curve')
+                    if pc is not None:
+                        rows = []
+                        running = 0.0
+                        end_wk = min(s['week'] + cov_sup_local, weeks)
+                        for i in range(s['week'] + 1, s['week'] + cov_sup_local + 1):
+                            base_val = pc[i] if (0 < i < len(pc)) else 0.0
+                            scaled = base_val * pf
+                            running += scaled
+                            note = "  (past sim end → 0)" if i > weeks else ""
+                            rows.append({
+                                "Week":                       f"W{i}{note}",
+                                "Planner's shape (avg=100)":  f"{base_val:.1f}",
+                                f"× f = {pf:.2f}":            f"{scaled:.0f}",
+                                "Running sum":                f"{running:.0f}",
+                            })
+                        st.markdown(
+                            f"**Worked example for the supplier order at W{s['week']}.** "
+                            f"Coverage `cov_sup = mat + semi + fp + dist + freq = "
+                            f"{mat_lt}+{semi_lt}+{fp_lt}+{dist_lt}+{order_freq} = "
+                            f"**{cov_sup_local} weeks**`. The lookahead window is "
+                            f"**W{s['week']+1} → W{s['week']+cov_sup_local}**. "
+                            f"The planner's shape was scaled to avg = {BASE_FORECAST}/wk at sim "
+                            f"start; each value below is the shape × the discovered factor "
+                            f"**f = {pf:.2f}**:"
+                        )
+                        st.table(pd.DataFrame(rows).set_index("Week"))
+                        st.markdown(
+                            f"⇒ **target_sup = {running:.0f}** units. The planner wants the "
+                            f"supplier-stage inventory position (stores + all WIP + pb) to be "
+                            f"at least this much, so that the chain can deliver the "
+                            f"already-anticipated seasonal demand over the next "
+                            f"{cov_sup_local} weeks. The same logic applies at each of "
+                            f"the other 3 stages with progressively shorter windows: "
+                            f"cov_semi = {cov_semi_local} wk, cov_fp = {cov_fp_local} wk, "
+                            f"cov_ship = {cov_ship_local} wk."
+                        )
                 else:
                     st.markdown(
                         f"Because the demand profile is **linear/flat**, the planner's "
                         f"forecast is simply the latest observed demand: "
                         f"**ff = {s['forecast']:.0f}/wk**. Each target is therefore "
                         f"computed as **ff × coverage**, where coverage = lead time "
-                        f"from that stage to the store + ordering frequency."
+                        f"from that stage to the store + ordering frequency. For the "
+                        f"supplier: target_sup = ff × (mat+semi+fp+dist+freq) = "
+                        f"{s['forecast']:.0f} × "
+                        f"({mat_lt}+{semi_lt}+{fp_lt}+{dist_lt}+{order_freq}) = "
+                        f"{s['forecast']:.0f} × {cov_sup_local} = "
+                        f"**{int(s['forecast']) * cov_sup_local}** units."
                     )
 
                 # Per-stage narrative for the supplier
