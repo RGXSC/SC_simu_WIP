@@ -468,6 +468,17 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
         cw      += fp_arr
         s['raw_mat_before_prod'] = round(raw_mat, 1)
 
+        # --- Execution-lag snapshot: each stage's actual ship/process this
+        # --- week uses the backlog AS IT STOOD AT THE END OF LAST WEEK, not
+        # --- the post-this-week's-planning value. This implements the
+        # --- "decision at week N → execution starts week N+1" semantic the
+        # --- user specified. Equivalent to: planner orders at end of week,
+        # --- supplier/factory acts on it starting next week.
+        pb_avail      = pb
+        semi_bl_avail = semi_backlog
+        fp_bl_avail   = fp_backlog
+        ship_bl_avail = ship_backlog
+
         # 4. Planner review (only on review weeks). Computes four push
         #    orders in parallel — one per stage — each comparing a target
         #    against a downstream existing position that includes that
@@ -599,10 +610,12 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
         else:
             s['target_sup'] = round(ff * cov_sup, 0)
 
-        # 5. Supplier ships — against pb, capped by supplier capacity.
+        # 5. Supplier ships — against pb_avail (end-of-last-week backlog), capped
+        # by supplier capacity. New orders placed this week (added to pb at
+        # step 4) only become available for shipping next week.
         pc = min(cap_start * (1 + pn * cap_ramp), cap_start * 10)
-        if pb > 0.01:
-            shipped = math.ceil(min(pb, pc))
+        if pb_avail > 0.01:
+            shipped = math.ceil(min(pb_avail, pc))
             pb -= shipped
         else:
             shipped = 0.0
@@ -611,11 +624,11 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
         s['supplier_shipped'] = round(shipped, 1)
         s['supplier_cap']     = round(pc, 0)
 
-        # 6. Semi processing — RM → semi_pipe. Against semi_backlog, capped
-        #    by RM available AND semi capacity.
+        # 6. Semi processing — RM → semi_pipe. Against semi_bl_avail (end-of-
+        # last-week backlog), capped by RM available AND semi capacity.
         sc_ = min(cap_start * (1 + sn * cap_ramp), cap_start * 10)
-        if raw_mat > 0.01 and semi_backlog > 0.01:
-            si = math.ceil(min(raw_mat, sc_, semi_backlog))
+        if raw_mat > 0.01 and semi_bl_avail > 0.01:
+            si = math.ceil(min(raw_mat, sc_, semi_bl_avail))
             raw_mat      -= si
             semi_backlog -= si
         else:
@@ -627,11 +640,11 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
         s['raw_mat_stock'] = round(raw_mat, 1)
         s['semi_backlog']  = round(semi_backlog, 1)
 
-        # 7. FP processing — Semi → fp_pipe. Against fp_backlog, capped by
-        #    Semi available AND FP capacity.
+        # 7. FP processing — Semi → fp_pipe. Against fp_bl_avail (end-of-last-
+        # week backlog), capped by Semi available AND FP capacity.
         fpc = min(cap_start * (1 + fn * cap_ramp), cap_start * 10)
-        if semi > 0.01 and fp_backlog > 0.01:
-            fi = math.ceil(min(semi, fpc, fp_backlog))
+        if semi > 0.01 and fp_bl_avail > 0.01:
+            fi = math.ceil(min(semi, fpc, fp_bl_avail))
             semi       -= fi
             fp_backlog -= fi
         else:
@@ -645,9 +658,9 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
 
         # 8. CW push — cw → dist_pipes. Distribution is pure logistics (trucks,
         #    picking, transport): no per-week throughput limit. Constrained
-        #    only by available cw and the planner's ship_backlog.
-        if cw > 0.01 and ship_backlog > 0.01:
-            ship_out = math.ceil(min(cw, ship_backlog))
+        #    only by available cw and the end-of-last-week ship_backlog.
+        if cw > 0.01 and ship_bl_avail > 0.01:
+            ship_out = math.ceil(min(cw, ship_bl_avail))
             cw           -= ship_out
             ship_backlog -= ship_out
         else:
