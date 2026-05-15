@@ -495,7 +495,27 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
                 actual_cum   = sum(demand[i] for i in range(1, w + 1))
                 expected_cum = sum(planner_curve_internal[i] for i in range(1, w + 1))
                 if expected_cum > 0.01:
-                    planner_factor = actual_cum / expected_cum
+                    raw_factor = actual_cum / expected_cum
+                    # Snap to clean integer (or 0.1 increment) when the
+                    # observed ratio is within rounding-drift distance of
+                    # one. The rounded integer demand curves the user picks
+                    # via the presets always produce factors that are nearly
+                    # but not exactly clean (avg=300 vs avg=100 gives ~2.99
+                    # because each weekly demand was independently rounded).
+                    # Snapping keeps the math clean and the display readable
+                    # without affecting any other scenario.
+                    snapped_int = round(raw_factor)
+                    if abs(raw_factor - snapped_int) < 0.05 and snapped_int > 0:
+                        planner_factor = float(snapped_int)
+                    else:
+                        snapped_1dec = round(raw_factor * 10) / 10
+                        # 0.02 tolerance: at low ratios (e.g. avg=30 → ~0.288)
+                        # the per-week integer rounding causes relatively
+                        # larger drift than at high ratios.
+                        if abs(raw_factor - snapped_1dec) < 0.02:
+                            planner_factor = snapped_1dec
+                        else:
+                            planner_factor = raw_factor
                 else:
                     planner_factor = 1.0
                 planner_factor_week = w
@@ -2234,11 +2254,11 @@ if _pf is not None:
     _badge_border = '#d4a018' if state.get('planner_factor_locked') else '#dde3ed'
     _badge_msg = ("⚡ Planner realizes factor of " if state.get('planner_factor_locked')
                   else "Planner factor (locked): ")
-    # Display: drop the decimal if the factor is essentially integer
-    if abs(_pf - round(_pf)) < 0.05:
-        _pf_str = f"{round(_pf):.0f}×"
-    else:
-        _pf_str = f"{_pf:.1f}×"
+    # Display: use 3 significant figures and strip trailing zeros so a snapped
+    # integer factor (3.0) shows as "3×" and an off-integer factor (2.85)
+    # shows as "2.85×". Engine already snaps factors near integers, so this
+    # is mostly a safety belt for non-preset cases.
+    _pf_str = f"{_pf:.3g}×"
     st.markdown(
         f'<div style="background:{_badge_bg};border:1px solid {_badge_border};'
         f'border-radius:8px;padding:8px 16px;margin-bottom:8px;font-size:14px;'
@@ -2326,11 +2346,11 @@ if st.session_state.get("show_calcs", False):
                     st.markdown(
                         f"Because the demand profile is **seasonal**, the planner knows "
                         f"the curve shape but had to discover the actual amplitude. The "
-                        f"locked adjustment factor is **f = {pf:.2f}×**, meaning actual "
-                        f"demand has turned out to be {pf:.2f} times what the planner "
+                        f"locked adjustment factor is **f = {pf:.3g}×**, meaning actual "
+                        f"demand has turned out to be {pf:.3g} times what the planner "
                         f"initially assumed (avg = {BASE_FORECAST}/wk). Therefore each "
                         f"target below is computed as **Σ planner_curve[w+1 … w+cov_x] "
-                        f"× {pf:.2f}** — the sum of the next cov_x weeks of the scaled "
+                        f"× {pf:.3g}** — the sum of the next cov_x weeks of the scaled "
                         f"seasonal curve."
                     )
                     # Concrete numerical derivation for the supplier target.
@@ -2351,7 +2371,7 @@ if st.session_state.get("show_calcs", False):
                             rows.append({
                                 "Week":                       f"W{i}{note}",
                                 "Planner's shape (avg=100)":  f"{base_val:.1f}",
-                                f"× f = {pf:.2f}":            f"{scaled:.0f}",
+                                f"× f = {pf:.3g}":            f"{scaled:.0f}",
                                 "Running sum":                f"{running:.0f}",
                             })
                         st.markdown(
@@ -2362,7 +2382,7 @@ if st.session_state.get("show_calcs", False):
                             f"**W{s['week']+1} → W{s['week']+cov_sup_local}**. "
                             f"The planner's shape was scaled to avg = {BASE_FORECAST}/wk at sim "
                             f"start; each value below is the shape × the discovered factor "
-                            f"**f = {pf:.2f}**:"
+                            f"**f = {pf:.3g}**:"
                         )
                         st.table(pd.DataFrame(rows).set_index("Week"))
                         st.markdown(
