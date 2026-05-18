@@ -2542,6 +2542,96 @@ if st.session_state.get("show_calcs", False):
                     f"− shipped ({s.get('supplier_shipped', 0):.0f}) = end-of-week pb "
                     f"({s.get('backlog', 0):.0f}). Same logic for the other 3 backlogs."
                 )
+
+                # --- Per-store gap explanation (only when smart distribution is on) ---
+                if smart_distrib and store_a_pct > 0 and store_a_pct < 100:
+                    pa = store_a_pct / 100.0
+                    pb_share = 1.0 - pa
+                    st.markdown(
+                        "**Why the 'Per-store gap' column?** The pooled targets above "
+                        "pool the two stores' demand and the system's stock together. "
+                        "But when Store A and Store B have different demand shares "
+                        f"({store_a_pct}% / {100-store_a_pct}%), the pooled view can "
+                        "miss a case where ONE store would starve even though the "
+                        "aggregate looks fine. The per-store check asks, for each "
+                        "stage independently:\n\n"
+                        "> *Will each store individually have enough, assuming smart "
+                        "distribution splits the common upstream pool by demand share?*"
+                    )
+                    st.markdown(
+                        f"For each stage:\n"
+                        f"- **A_supply** = `store_a + Σdist_pipe_a + pct_a × common_pool`\n"
+                        f"- **B_supply** = `store_b + Σdist_pipe_b + pct_b × common_pool`\n"
+                        f"- **A_demand** = `pct_a × demand_over_cov_x` "
+                        f"= `{pa:.2f} × <look-ahead sum>`\n"
+                        f"- **B_demand** = `pct_b × demand_over_cov_x` "
+                        f"= `{pb_share:.2f} × <look-ahead sum>`\n"
+                        f"- **A_gap** = `max(0, A_demand − A_supply)` "
+                        f"(units A would miss)\n"
+                        f"- **B_gap** = `max(0, B_demand − B_supply)`\n"
+                        f"- **Per-store gap** column = A_gap + B_gap, minus any pull "
+                        f"already in that stage's own backlog.\n\n"
+                        f"The `common_pool` is everything downstream of that stage that "
+                        f"smart distribution will eventually split between A and B "
+                        f"(it's NOT yet allocated to either store):\n"
+                        f"- **Ship**:     0   (we're computing the pool itself)\n"
+                        f"- **FP**:       fp_pipe + cw\n"
+                        f"- **Semi-Fin**: semi_pipe + semi + fp_pipe + cw\n"
+                        f"- **Supplier**: mat_pipe + raw_mat + semi_pipe + semi + "
+                        f"fp_pipe + cw + pb\n\n"
+                        f"The 'Final order' is then `max(pooled-gap, per-store-gap)` — "
+                        f"so a stage orders more if EITHER the pooled view OR the "
+                        f"individual-store check says there's a shortfall."
+                    )
+
+                    # Worked example for the Supplier (most reach, most opaque)
+                    cd_sup = calc['sup']
+                    if seasonal_mode and pf is not None:
+                        demand_X = sum(pc[i] if (0 < i < len(pc)) else 0.0
+                                       for i in range(s['week'] + 1, s['week'] + cov_sup_local + 1)) * pf
+                    else:
+                        demand_X = s['forecast'] * cov_sup_local
+                    common_pool_sup = (sum(s.get('mat_pipe', []))
+                                      + s.get('raw_mat_stock', 0)
+                                      + sum(s.get('semi_pipe', []))
+                                      + s.get('semi_stock', 0)
+                                      + sum(s.get('fp_pipe', []))
+                                      + s.get('cw_stock', 0)
+                                      + pb_pre)
+                    a_supply = s['store_a'] + sum(s.get('dist_pipe_a', [])) + pa * common_pool_sup
+                    b_supply = s['store_b'] + sum(s.get('dist_pipe_b', [])) + pb_share * common_pool_sup
+                    a_demand = pa * demand_X
+                    b_demand = pb_share * demand_X
+                    a_gap = max(0, a_demand - a_supply)
+                    b_gap = max(0, b_demand - b_supply)
+                    st.markdown(
+                        f"**Concrete example — Supplier per-store gap at W{s['week']}:**"
+                    )
+                    ps_rows = [
+                        {'Quantity':   'demand_over_cov_sup (next ' + str(cov_sup_local) + ' wks)',
+                         'A':          f"{a_demand:.0f}  (= {pa:.2f} × {demand_X:.0f})",
+                         'B':          f"{b_demand:.0f}  (= {pb_share:.2f} × {demand_X:.0f})"},
+                        {'Quantity':   'A/B own dedicated supply (store + dist pipe)',
+                         'A':          f"{s['store_a'] + sum(s.get('dist_pipe_a', [])):.0f}",
+                         'B':          f"{s['store_b'] + sum(s.get('dist_pipe_b', [])):.0f}"},
+                        {'Quantity':   f"pro-rata share of common pool ({common_pool_sup:.0f})",
+                         'A':          f"{pa * common_pool_sup:.0f}  (= {pa:.2f} × {common_pool_sup:.0f})",
+                         'B':          f"{pb_share * common_pool_sup:.0f}  (= {pb_share:.2f} × {common_pool_sup:.0f})"},
+                        {'Quantity':   '⇒ Total supply',
+                         'A':          f"**{a_supply:.0f}**",
+                         'B':          f"**{b_supply:.0f}**"},
+                        {'Quantity':   '⇒ Gap (= max(0, demand − supply))',
+                         'A':          f"**{a_gap:.0f}**",
+                         'B':          f"**{b_gap:.0f}**"},
+                    ]
+                    st.table(pd.DataFrame(ps_rows).set_index('Quantity'))
+                    st.markdown(
+                        f"Sum of per-store gaps = {a_gap:.0f} + {b_gap:.0f} = "
+                        f"**{a_gap + b_gap:.0f}**. After subtracting the supplier's "
+                        f"already-pending backlog ({pb_pre:.0f}), the Per-store gap "
+                        f"contribution shown for Supplier in the table above is "
+                        f"**{max(0, a_gap + b_gap - pb_pre):.0f}**."
+                    )
             else:
                 next_review = ((s['week'] // order_freq) + 1) * order_freq
                 st.markdown(
