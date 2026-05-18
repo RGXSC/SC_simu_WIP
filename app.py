@@ -560,20 +560,31 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
             ps_gaps = {'sup': 0.0, 'semi': 0.0, 'fp': 0.0, 'ship': 0.0}
 
             # Per-store gap adjustment: pooled targets can miss the case where
-            # one store starves while another has surplus. With smart distribution
-            # the common upstream pool will be allocated by demand share, so we
-            # compute each store's expected supply and pump up the order to cover
-            # any individual-store gap that the pooled check overlooked.
+            # one store starves while another has surplus. With smart distribution,
+            # the planner's expected allocation of the common upstream pool is
+            # NOT a naive pct split — it's the cover-equalising allocation that
+            # the CW push step will actually do later. We compute that ideal
+            # share here so ordering and execution use the same logic.
             if smart_distrib and pct_a > 0 and pct_b > 0:
                 def _ps_gap(cov_x, common_pool):
                     if seasonal_mode:
                         dx = _lookahead_sum(planner_curve_internal, w + 1, w + cov_x)
                     else:
                         dx = ff * cov_x
-                    ap = store_a + sum(dist_pipe_a) + pct_a * common_pool
-                    bp = store_b + sum(dist_pipe_b) + pct_b * common_pool
-                    a_gap = max(0.0, pct_a * dx - ap)
-                    b_gap = max(0.0, pct_b * dx - bp)
+                    a0 = store_a + sum(dist_pipe_a)
+                    b0 = store_b + sum(dist_pipe_b)
+                    total_avail = a0 + b0 + common_pool
+                    # Smart's target: equal cover ⇒ each store gets pct × total.
+                    # share_a = (pct_a × total) − A's already-dedicated stock.
+                    # Clip to [0, common_pool] because smart can only ALLOCATE
+                    # the common_pool (it cannot move units already at B's store
+                    # to A, so negative shares are impossible).
+                    ideal_share_a = pct_a * total_avail - a0
+                    share_a = max(0.0, min(common_pool, ideal_share_a))
+                    a_supply = a0 + share_a
+                    b_supply = total_avail - a_supply
+                    a_gap = max(0.0, pct_a * dx - a_supply)
+                    b_gap = max(0.0, pct_b * dx - b_supply)
                     return a_gap + b_gap
 
                 pool_ship = 0
@@ -2559,29 +2570,41 @@ if st.session_state.get("show_calcs", False):
                         "distribution splits the common upstream pool by demand share?*"
                     )
                     st.markdown(
-                        f"For each stage:\n"
-                        f"- **A_supply** = `store_a + Σdist_pipe_a + pct_a × common_pool`\n"
-                        f"- **B_supply** = `store_b + Σdist_pipe_b + pct_b × common_pool`\n"
-                        f"- **A_demand** = `pct_a × demand_over_cov_x` "
-                        f"= `{pa:.2f} × <look-ahead sum>`\n"
-                        f"- **B_demand** = `pct_b × demand_over_cov_x` "
-                        f"= `{pb_share:.2f} × <look-ahead sum>`\n"
-                        f"- **A_gap** = `max(0, A_demand − A_supply)` "
-                        f"(units A would miss)\n"
-                        f"- **B_gap** = `max(0, B_demand − B_supply)`\n"
-                        f"- **Per-store gap** column = A_gap + B_gap, minus any pull "
-                        f"already in that stage's own backlog.\n\n"
-                        f"The `common_pool` is everything downstream of that stage that "
-                        f"smart distribution will eventually split between A and B "
-                        f"(it's NOT yet allocated to either store):\n"
+                        f"The 'cleverness' is that the planner doesn't assume a "
+                        f"naïve `pct × pool` split of the common pool — it assumes "
+                        f"the SAME cover-equalising allocation that the CW push "
+                        f"executor will actually use later. Concretely, for each "
+                        f"stage:\n\n"
+                        f"```\n"
+                        f"A_owned = store_a + Σ dist_pipe_a    (A-specific, can't be reassigned)\n"
+                        f"B_owned = store_b + Σ dist_pipe_b\n"
+                        f"total   = A_owned + B_owned + common_pool\n\n"
+                        f"# Smart's ideal: cover_a = cover_b after distribution\n"
+                        f"# ⇒ each store ends up with its demand-share of total:\n"
+                        f"share_a = clip(0, common_pool, pct_a × total − A_owned)\n"
+                        f"A_supply = A_owned + share_a\n"
+                        f"B_supply = total − A_supply\n\n"
+                        f"A_demand = pct_a × demand_over_cov_x        (= {pa:.2f} × lookahead)\n"
+                        f"B_demand = pct_b × demand_over_cov_x        (= {pb_share:.2f} × lookahead)\n\n"
+                        f"A_gap = max(0, A_demand − A_supply)\n"
+                        f"B_gap = max(0, B_demand − B_supply)\n"
+                        f"Per-store gap = (A_gap + B_gap) − this stage's own backlog\n"
+                        f"```\n\n"
+                        f"The clip on `share_a` matters in two ways:\n"
+                        f"- If A is already over-covered (large `A_owned`), "
+                        f"`pct_a × total − A_owned` may be negative → smart keeps the "
+                        f"pool for B, share_a clamps to 0.\n"
+                        f"- If B is very over-covered (so `pct_a × total − A_owned` "
+                        f"exceeds the pool size), share_a is capped at `common_pool` "
+                        f"— smart can't physically move B's already-at-store stock "
+                        f"to A, only allocate units in the common pool.\n\n"
+                        f"The `common_pool` for each stage:\n"
                         f"- **Ship**:     0   (we're computing the pool itself)\n"
                         f"- **FP**:       fp_pipe + cw\n"
                         f"- **Semi-Fin**: semi_pipe + semi + fp_pipe + cw\n"
                         f"- **Supplier**: mat_pipe + raw_mat + semi_pipe + semi + "
                         f"fp_pipe + cw + pb\n\n"
-                        f"The 'Final order' is then `max(pooled-gap, per-store-gap)` — "
-                        f"so a stage orders more if EITHER the pooled view OR the "
-                        f"individual-store check says there's a shortfall."
+                        f"Final order = `max(pooled-gap, per-store-gap)`."
                     )
 
                     # Worked example for the Supplier (most reach, most opaque)
@@ -2598,25 +2621,36 @@ if st.session_state.get("show_calcs", False):
                                       + sum(s.get('fp_pipe', []))
                                       + s.get('cw_stock', 0)
                                       + pb_pre)
-                    a_supply = s['store_a'] + sum(s.get('dist_pipe_a', [])) + pa * common_pool_sup
-                    b_supply = s['store_b'] + sum(s.get('dist_pipe_b', [])) + pb_share * common_pool_sup
+                    a0_sup = s['store_a'] + sum(s.get('dist_pipe_a', []))
+                    b0_sup = s['store_b'] + sum(s.get('dist_pipe_b', []))
+                    total_sup = a0_sup + b0_sup + common_pool_sup
+                    ideal_share_a = pa * total_sup - a0_sup
+                    share_a = max(0, min(common_pool_sup, ideal_share_a))
+                    a_supply = a0_sup + share_a
+                    b_supply = total_sup - a_supply
                     a_demand = pa * demand_X
                     b_demand = pb_share * demand_X
                     a_gap = max(0, a_demand - a_supply)
                     b_gap = max(0, b_demand - b_supply)
+                    share_note = ""
+                    if ideal_share_a < 0:
+                        share_note = f" (clamped to 0 — A already over-covered)"
+                    elif ideal_share_a > common_pool_sup:
+                        share_note = f" (clamped to pool — A still short, B's at-store stock can't be moved)"
                     st.markdown(
-                        f"**Concrete example — Supplier per-store gap at W{s['week']}:**"
+                        f"**Concrete example — Supplier per-store gap at W{s['week']}** "
+                        f"(smart-aware allocation, not naïve pct split):"
                     )
                     ps_rows = [
                         {'Quantity':   'demand_over_cov_sup (next ' + str(cov_sup_local) + ' wks)',
                          'A':          f"{a_demand:.0f}  (= {pa:.2f} × {demand_X:.0f})",
                          'B':          f"{b_demand:.0f}  (= {pb_share:.2f} × {demand_X:.0f})"},
-                        {'Quantity':   'A/B own dedicated supply (store + dist pipe)',
-                         'A':          f"{s['store_a'] + sum(s.get('dist_pipe_a', [])):.0f}",
-                         'B':          f"{s['store_b'] + sum(s.get('dist_pipe_b', [])):.0f}"},
-                        {'Quantity':   f"pro-rata share of common pool ({common_pool_sup:.0f})",
-                         'A':          f"{pa * common_pool_sup:.0f}  (= {pa:.2f} × {common_pool_sup:.0f})",
-                         'B':          f"{pb_share * common_pool_sup:.0f}  (= {pb_share:.2f} × {common_pool_sup:.0f})"},
+                        {'Quantity':   'A/B own dedicated stock (store + dist pipe)',
+                         'A':          f"{a0_sup:.0f}",
+                         'B':          f"{b0_sup:.0f}"},
+                        {'Quantity':   f"Smart-equalising share of common pool ({common_pool_sup:.0f})",
+                         'A':          f"{share_a:.0f}  (ideal: {ideal_share_a:.0f}{share_note})",
+                         'B':          f"{common_pool_sup - share_a:.0f}"},
                         {'Quantity':   '⇒ Total supply',
                          'A':          f"**{a_supply:.0f}**",
                          'B':          f"**{b_supply:.0f}**"},
