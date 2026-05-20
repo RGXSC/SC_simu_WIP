@@ -277,7 +277,7 @@ def _smart_alloc_n(ship_out, stores_arr, dist_pipes, forecast_per_store):
 TIER_WEIGHTS = {"small": 0.5, "medium": 1.0, "flagship": 4.0}
 TIER_SHARE   = {"small": 0.60, "medium": 0.30, "flagship": 0.10}
 
-def _store_tier_probs(n_stores, rng_seed):
+def _store_tier_probs(n_stores, rng_seed=None):
     """
     Persistent per-store demand share.
 
@@ -299,15 +299,14 @@ def _store_tier_probs(n_stores, rng_seed):
     if n_small < 0:                                 # very small N: clamp
         n_small = 0
         n_medium = max(0, n - n_flag)
+    # Deterministic ordering: store 1..n_flag are flagships, next n_medium
+    # are medium, the rest are small. Makes the per-store matrix readable
+    # without sorting and keeps store ids stable across runs.
     weights = np.concatenate([
-        np.full(n_small,  TIER_WEIGHTS["small"]),
-        np.full(n_medium, TIER_WEIGHTS["medium"]),
         np.full(n_flag,   TIER_WEIGHTS["flagship"]),
+        np.full(n_medium, TIER_WEIGHTS["medium"]),
+        np.full(n_small,  TIER_WEIGHTS["small"]),
     ])
-    # Separate RNG stream from demand so changing N doesn't reshuffle demand.
-    rng_tier = np.random.default_rng(int(rng_seed) + 99991)
-    order = rng_tier.permutation(n)
-    weights = weights[order]
     tiers = np.where(weights == TIER_WEIGHTS["flagship"], "flagship",
              np.where(weights == TIER_WEIGHTS["medium"], "medium", "small")).tolist()
     probs = weights / weights.sum()
@@ -2493,43 +2492,50 @@ if zoom_open:
         # --- Sales matrix: one row per store, one column per week ---
         st.markdown("**Sales matrix — every store, every week**")
         st.caption(
-            "🟢 **Sold** (had stock & demand met) · "
+            "🟢 **Sold** (had stock, demand met) · "
             "🔴 **Missed** (demand but stockout) · "
-            "⚪ **Idle** (no demand this week). "
-            "Rows sorted flagship → medium → small so top-sellers stay grouped."
+            "🟡 **Held** (had stock, no demand — paid carrying cost for nothing) · "
+            "⚪ **Idle** (no stock, no demand). "
+            "Stores are numbered flagship → medium → small."
         )
 
-        TIER_RANK = {'flagship': 0, 'medium': 1, 'small': 2}
         # Build long-format frame across all simulated weeks.
+        # Held = had stock at week-end but no demand this week (the lesson:
+        # carrying-cost wasted). Idle = no stock and no demand (empty).
         rows_data = []
         for w_idx in range(1, len(states)):
             st_obj = states[w_idx]
             pd_arr = st_obj.get('per_store_dem', [])
             ps_arr = st_obj.get('per_store_sales', [])
             pm_arr = st_obj.get('per_store_missed', [])
+            stk_arr = st_obj.get('stores', [])
             for i in range(n_stores):
-                dem    = pd_arr[i] if i < len(pd_arr) else 0
-                sales  = ps_arr[i] if i < len(ps_arr) else 0
-                missed = pm_arr[i] if i < len(pm_arr) else 0
+                dem    = pd_arr[i]  if i < len(pd_arr)  else 0
+                sales  = ps_arr[i]  if i < len(ps_arr)  else 0
+                missed = pm_arr[i]  if i < len(pm_arr)  else 0
+                stk    = stk_arr[i] if i < len(stk_arr) else 0
                 if missed > 0.5:
                     s_lbl = "Missed"
                 elif dem > 0.5:
                     s_lbl = "Sold"
+                elif stk > 0.5:
+                    s_lbl = "Held"
                 else:
                     s_lbl = "Idle"
                 rows_data.append({
                     'store':  i + 1,
                     'tier':   tier_labels[i],
-                    'tier_rank': TIER_RANK.get(tier_labels[i], 3),
                     'week':   w_idx,
                     'state':  s_lbl,
                     'demand': dem,
                     'sales':  sales,
                     'missed': missed,
+                    'stock_end': stk,
                 })
         mat_df = pd.DataFrame(rows_data)
 
-        # Cap displayed rows for very large N (stratified sample by tier).
+        # Cap displayed rows for very large N (proportional slice by tier
+        # from the START of each tier block — stores are already in order).
         MAX_MATRIX_ROWS = 80
         if n_stores > MAX_MATRIX_ROWS:
             n_f_show = max(1, int(round(MAX_MATRIX_ROWS * TIER_SHARE['flagship'])))
@@ -2546,11 +2552,9 @@ if zoom_open:
                 f"{len(small_ids)} small) — first stores of each tier._"
             )
 
-        # Sort store axis high → medium → slow, then by store id.
-        unique_stores = sorted(
-            mat_df['store'].unique(),
-            key=lambda s: (TIER_RANK.get(tier_labels[s - 1], 3), s),
-        )
+        # Stores are now numbered flagship → medium → small (1..N), so
+        # ordering by store id gives the right group sequence.
+        unique_stores = sorted(mat_df['store'].unique())
 
         # Highlight the currently-selected week with a vertical rule.
         current_week_df = pd.DataFrame({'week': [state['week']]})
@@ -2573,19 +2577,20 @@ if zoom_open:
                   color=alt.Color(
                       'state:N',
                       scale=alt.Scale(
-                          domain=['Sold', 'Missed', 'Idle'],
-                          range=['#1a8a4a', '#c0392b', '#e8e8e8'],
+                          domain=['Sold', 'Missed', 'Held', 'Idle'],
+                          range=['#1a8a4a', '#c0392b', '#f1c40f', '#e8e8e8'],
                       ),
                       legend=alt.Legend(title='Week state', orient='top'),
                   ),
                   tooltip=[
-                      alt.Tooltip('store:O', title='Store'),
-                      alt.Tooltip('tier:N',  title='Tier'),
-                      alt.Tooltip('week:O',  title='Week'),
-                      alt.Tooltip('demand:Q', title='Demand'),
-                      alt.Tooltip('sales:Q',  title='Sales'),
-                      alt.Tooltip('missed:Q', title='Missed'),
-                      alt.Tooltip('state:N',  title='State'),
+                      alt.Tooltip('store:O',    title='Store'),
+                      alt.Tooltip('tier:N',     title='Bucket'),
+                      alt.Tooltip('week:O',     title='Week'),
+                      alt.Tooltip('demand:Q',   title='Demand'),
+                      alt.Tooltip('sales:Q',    title='Sales'),
+                      alt.Tooltip('missed:Q',   title='Missed'),
+                      alt.Tooltip('stock_end:Q',title='Stock end-of-wk'),
+                      alt.Tooltip('state:N',    title='State'),
                   ],
               )
               .properties(height=max(180, row_h * n_rows))
@@ -2597,34 +2602,49 @@ if zoom_open:
         )
         st.altair_chart(heatmap + current_rule, use_container_width=True)
 
-        # Per-store snapshot of the currently-selected week.
-        per_df = pd.DataFrame({
-            'store': list(range(1, len(stores_arr) + 1)),
-            'tier':          tier_labels,
-            'stock_end_wk':  stores_arr,
-            'demand_wk':     per_dem,
-            'sales_wk':      per_sales,
-            'missed_wk':     per_missed,
-            'alloc_in_wk':   allocs_arr if len(allocs_arr) == len(stores_arr) else [0] * len(stores_arr),
-            'dist_pipe':     dist_per_store,
-        })
-        if n_stores <= 20:
-            st.markdown(f"**Per-store snapshot — W{state['week']}**")
-            st.dataframe(per_df, use_container_width=True,
-                         hide_index=True, height=min(420, 40 + len(per_df) * 32))
-        else:
-            st.markdown(f"**Per-store snapshot — W{state['week']} (extremes only)**")
-            top_miss = per_df.sort_values("missed_wk", ascending=False).head(5)
-            low_stk  = per_df.sort_values("stock_end_wk").head(5)
-            cc1, cc2 = st.columns(2)
-            with cc1:
-                st.markdown("**Most stockouts this week**")
-                st.dataframe(top_miss, use_container_width=True, hide_index=True,
-                             height=240)
-            with cc2:
-                st.markdown("**Lowest stock end of week**")
-                st.dataframe(low_stk, use_container_width=True, hide_index=True,
-                             height=240)
+        # --- Per-bucket synthesis for the currently-selected week ---
+        st.markdown(f"**Per-bucket synthesis — W{state['week']}**")
+        ps_rate_arr = state.get('ps_rate', [0.0] * n_stores)
+        bucket_order = ['flagship', 'medium', 'small']
+        bkt_rows = []
+        for bkt in bucket_order:
+            idx = [i for i, t in enumerate(tier_labels) if t == bkt]
+            if not idx:
+                continue
+            n_b = len(idx)
+            stk_sum  = float(sum(stores_arr[i]    for i in idx if i < len(stores_arr)))
+            dem_sum  = float(sum(per_dem[i]       for i in idx if i < len(per_dem)))
+            sale_sum = float(sum(per_sales[i]     for i in idx if i < len(per_sales)))
+            miss_sum = float(sum(per_missed[i]    for i in idx if i < len(per_missed)))
+            alloc_sum= float(sum(allocs_arr[i]    for i in idx if i < len(allocs_arr)))
+            pipe_sum = float(sum(dist_per_store[i]for i in idx if i < len(dist_per_store)))
+            rate_sum = float(sum(ps_rate_arr[i]   for i in idx if i < len(ps_rate_arr)))
+            stockouts = sum(1 for i in idx
+                            if i < len(per_missed) and per_missed[i] > 0.5)
+            service = (sale_sum / dem_sum * 100.0) if dem_sum > 0.5 else 100.0
+            bkt_rows.append({
+                'Bucket':         bkt.capitalize(),
+                'Stores':         n_b,
+                'Learned rate (avg/store)': round(rate_sum / n_b, 2),
+                'Stock end (sum)':         round(stk_sum),
+                'Stock end (avg)':         round(stk_sum / n_b, 1),
+                'Demand wk (sum)':         round(dem_sum),
+                'Sales wk (sum)':          round(sale_sum),
+                'Missed wk (sum)':         round(miss_sum),
+                'Service %':               round(service, 1),
+                'Stockout stores':         f"{stockouts} / {n_b}",
+                'Allocated this wk':       round(alloc_sum),
+                'In dist-pipe':            round(pipe_sum),
+            })
+        bkt_df = pd.DataFrame(bkt_rows)
+        st.dataframe(bkt_df, use_container_width=True, hide_index=True,
+                     height=40 + len(bkt_df) * 38)
+        st.caption(
+            "_Service % = sales / demand for the bucket this week. "
+            "Watch flagships vs. small: a healthy plan keeps service high "
+            "for flagships (where most of the revenue lives) without "
+            "letting the small bucket pile up unused stock (Held cells)._"
+        )
 
 
 # --- Show-calculations expander (when toggle is ON) ---
