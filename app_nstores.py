@@ -14,6 +14,7 @@ Single-file constraint preserved. Reuses the same dependencies as app.py
 (streamlit, pandas, numpy, altair).
 """
 
+import io
 import streamlit as st
 import math
 import numpy as np
@@ -540,8 +541,338 @@ def compute_kpis_n(states, price, var_cost, fixed_pct, base_forecast, weeks,
 
 
 # ════════════════════════════════════════════════════════════════
-# UI
+# BATCH COMPARISON
 # ════════════════════════════════════════════════════════════════
+
+BATCH_INPUT_COLS = [
+    "Scenario\nLabel",
+    "Sim\nWeeks",
+    "N\nStores",
+    "Safety\nz",
+    "Seed",
+    "Material\nLT (wk)",
+    "Semi\nLT (wk)",
+    "Finishing\nLT (wk)",
+    "Distribution\nLT (wk)",
+    "Order\nFreq (wk)",
+    "Total Init\nStock (pcs)",
+    "Init Store\n%",
+    "Init WH\n%",
+    "Init Semi\n%",
+    "Smart\nDistrib",
+    "Demand\nShape",
+    "Linear End\n(pcs/wk)",
+    "Linear\nTransition (wk)",
+    "Seasonal\nSub-shape",
+    "Seasonal Avg\n(pcs/wk)",
+    "Capacity\nStart (pcs/wk)",
+    "Capacity Ramp\n(%/wk)",
+    "Price\n(€/pc)",
+    "Var Cost\n(€/pc)",
+    "Fixed Cost\n% of fcst rev",
+]
+
+BATCH_OUTPUT_COLS = [
+    "Revenue\n(€)",
+    "Cumul Sales\n(pcs)",
+    "Service\nLevel %",
+    "Missed Total\n(pcs)",
+    "Stockout\nWeeks",
+    "Stores w/\nStockouts",
+    "Avg Sales\n/ Store",
+    "Avg Missed\n/ Store",
+    "End Stock\nStd (pcs)",
+    "Init Stock\nValue (€)",
+    "Total VC\n(€)",
+    "Fixed Cost\n(€)",
+    "Net Margin\n(€)",
+    "Margin\n% of rev",
+    "Leftover\nUnits (pcs)",
+    "End Stock\nTotal (pcs)",
+]
+
+
+def _batch_default_rows():
+    """9 presets: 3 profiles × 3 N values, flat 100 pcs/wk aggregate, z=1.65."""
+    presets = []
+    for prof in ["Agile", "Medium", "Push"]:
+        for n in [10, 50, 200]:
+            presets.append((f"{prof:6s} · N={n:>3d}", prof, n))
+    rows = []
+    for label, lt_name, n in presets:
+        lt = LT_PROFILES[lt_name]
+        dist = STOCK_DIST[lt_name]
+        cov = lt["mat_lt"] + lt["semi_lt"] + lt["fp_lt"] + lt["dist_lt"] + lt["order_freq"]
+        stock = min(100 * cov, 10000)
+        rows.append({
+            BATCH_INPUT_COLS[0]:  label,
+            BATCH_INPUT_COLS[1]:  26,
+            BATCH_INPUT_COLS[2]:  n,
+            BATCH_INPUT_COLS[3]:  1.65,
+            BATCH_INPUT_COLS[4]:  42,
+            BATCH_INPUT_COLS[5]:  lt["mat_lt"],
+            BATCH_INPUT_COLS[6]:  lt["semi_lt"],
+            BATCH_INPUT_COLS[7]:  lt["fp_lt"],
+            BATCH_INPUT_COLS[8]:  lt["dist_lt"],
+            BATCH_INPUT_COLS[9]:  lt["order_freq"],
+            BATCH_INPUT_COLS[10]: stock,
+            BATCH_INPUT_COLS[11]: dist["store_pct"],
+            BATCH_INPUT_COLS[12]: dist["wh_pct"],
+            BATCH_INPUT_COLS[13]: dist["semi_pct"],
+            BATCH_INPUT_COLS[14]: True,
+            BATCH_INPUT_COLS[15]: "Linear",
+            BATCH_INPUT_COLS[16]: 100,
+            BATCH_INPUT_COLS[17]: 1,
+            BATCH_INPUT_COLS[18]: "Steep",
+            BATCH_INPUT_COLS[19]: 100,
+            BATCH_INPUT_COLS[20]: 200,
+            BATCH_INPUT_COLS[21]: 10,
+            BATCH_INPUT_COLS[22]: 10,
+            BATCH_INPUT_COLS[23]: 3,
+            BATCH_INPUT_COLS[24]: 20,
+        })
+    return pd.DataFrame(rows)
+
+
+def _run_one_scenario_n(row):
+    """Run one batch row through the N-stores engine and return KPI dict."""
+    w           = int(row[BATCH_INPUT_COLS[1]])
+    n_stores    = int(row[BATCH_INPUT_COLS[2]])
+    safety_z    = float(row[BATCH_INPUT_COLS[3]])
+    seed        = int(row[BATCH_INPUT_COLS[4]])
+    mat_lt      = int(row[BATCH_INPUT_COLS[5]])
+    semi_lt     = int(row[BATCH_INPUT_COLS[6]])
+    fp_lt       = int(row[BATCH_INPUT_COLS[7]])
+    dist_lt     = int(row[BATCH_INPUT_COLS[8]])
+    freq        = int(row[BATCH_INPUT_COLS[9]])
+    total_stock = int(row[BATCH_INPUT_COLS[10]])
+    sp          = int(row[BATCH_INPUT_COLS[11]])
+    wp          = int(row[BATCH_INPUT_COLS[12]])
+    sep         = int(row[BATCH_INPUT_COLS[13]])
+    smart       = bool(row[BATCH_INPUT_COLS[14]])
+    shape       = str(row[BATCH_INPUT_COLS[15]])
+    lin_end     = int(row[BATCH_INPUT_COLS[16]])
+    lin_wks     = int(row[BATCH_INPUT_COLS[17]])
+    seas_sub    = str(row[BATCH_INPUT_COLS[18]])
+    seas_avg    = int(row[BATCH_INPUT_COLS[19]])
+    cap_start   = float(row[BATCH_INPUT_COLS[20]])
+    cap_ramp    = float(row[BATCH_INPUT_COLS[21]]) / 100.0
+    price       = float(row[BATCH_INPUT_COLS[22]])
+    var_cost    = float(row[BATCH_INPUT_COLS[23]])
+    fixed_pct   = float(row[BATCH_INPUT_COLS[24]]) / 100.0
+
+    init_store  = int(round(total_stock * sp / 100))
+    init_cw     = int(round(total_stock * wp / 100))
+    init_semi   = int(round(total_stock * sep / 100))
+    init_raw    = total_stock - init_store - init_cw - init_semi
+
+    if "Seasonal" in shape:
+        shape_full = DEMAND_SHAPES[1]
+        cd = build_demand_curve(shape_full, w, base=BASE_FORECAST,
+                                seas_sub=seas_sub, seas_avg=seas_avg)
+        pc = [0.0] + list(seasonal_curve_float(w, seas_sub, BASE_FORECAST))
+    else:
+        shape_full = DEMAND_SHAPES[0]
+        cd = build_demand_curve(shape_full, w, base=BASE_FORECAST,
+                                lin_end=lin_end, lin_wks=lin_wks)
+        pc = None
+
+    states, store_history, sales_pc, missed_pc = run_simulation_n(
+        weeks=w, n_stores=n_stores,
+        init_per_store_total=init_store, init_cw=init_cw,
+        init_semi=init_semi, init_rawmat=init_raw,
+        order_freq=freq, mat_lt=mat_lt, semi_lt=semi_lt,
+        fp_lt=fp_lt, dist_lt=dist_lt,
+        cap_start=cap_start, cap_ramp=cap_ramp, base_forecast=BASE_FORECAST,
+        price=price, var_cost=var_cost, fixed_pct=fixed_pct,
+        smart_distrib=smart, safety_z=safety_z, rng_seed=seed,
+        aggregate_demand_mean=tuple(cd),
+        planner_curve=tuple(pc) if pc is not None else None,
+    )
+    k = compute_kpis_n(states, price, var_cost, fixed_pct, BASE_FORECAST, w,
+                       init_store, init_cw, init_semi, init_raw)
+
+    end_stock_per_store = store_history[-1]
+    return {
+        BATCH_OUTPUT_COLS[0]:  round(k["revenue"]),
+        BATCH_OUTPUT_COLS[1]:  round(k["total_sales"]),
+        BATCH_OUTPUT_COLS[2]:  round(k["svc_level"] * 100, 1),
+        BATCH_OUTPUT_COLS[3]:  round(k["total_missed"]),
+        BATCH_OUTPUT_COLS[4]:  k["stockout_weeks"],
+        BATCH_OUTPUT_COLS[5]:  int((missed_pc > 0).sum()),
+        BATCH_OUTPUT_COLS[6]:  round(float(sales_pc.mean()), 1),
+        BATCH_OUTPUT_COLS[7]:  round(float(missed_pc.mean()), 2),
+        BATCH_OUTPUT_COLS[8]:  round(float(end_stock_per_store.std()), 2),
+        BATCH_OUTPUT_COLS[9]:  round(k["init_stock_value"]),
+        BATCH_OUTPUT_COLS[10]: round(k["var_cost"]),
+        BATCH_OUTPUT_COLS[11]: round(k["fixed"]),
+        BATCH_OUTPUT_COLS[12]: round(k["margin"]),
+        BATCH_OUTPUT_COLS[13]: round(k["margin_pct"] * 100, 1),
+        BATCH_OUTPUT_COLS[14]: round(k["leftover_units"]),
+        BATCH_OUTPUT_COLS[15]: round(k["end_stock_units"]),
+    }
+
+
+def render_batch_ui_n():
+    st.markdown("# 📊 Batch Scenario Comparison — N stores")
+    st.caption("Edit one scenario per row, then click **Run all scenarios**. Each row is "
+               "fully reproducible from its **Seed** (so two rows with the same seed and N "
+               "see the same demand draws — fair apples-to-apples).")
+
+    if "batch_df" not in st.session_state:
+        st.session_state.batch_df = _batch_default_rows()
+
+    NumberCol = st.column_config.NumberColumn
+    SelectCol = st.column_config.SelectboxColumn
+    CheckCol  = st.column_config.CheckboxColumn
+    TextCol   = st.column_config.TextColumn
+    col_config = {
+        BATCH_INPUT_COLS[0]:  TextCol(width="medium", pinned=True),
+        BATCH_INPUT_COLS[1]:  NumberCol(min_value=13, max_value=52, step=1),
+        BATCH_INPUT_COLS[2]:  NumberCol(min_value=2, max_value=500, step=1),
+        BATCH_INPUT_COLS[3]:  NumberCol(min_value=0.0, max_value=3.0, step=0.05, format="%.2f"),
+        BATCH_INPUT_COLS[4]:  NumberCol(min_value=0, max_value=10000, step=1),
+        BATCH_INPUT_COLS[5]:  NumberCol(min_value=1, max_value=24, step=1),
+        BATCH_INPUT_COLS[6]:  NumberCol(min_value=1, max_value=12, step=1),
+        BATCH_INPUT_COLS[7]:  NumberCol(min_value=1, max_value=12, step=1),
+        BATCH_INPUT_COLS[8]:  NumberCol(min_value=1, max_value=12, step=1),
+        BATCH_INPUT_COLS[9]:  NumberCol(min_value=1, max_value=4, step=1),
+        BATCH_INPUT_COLS[10]: NumberCol(min_value=0, max_value=50000, step=50),
+        BATCH_INPUT_COLS[11]: NumberCol(min_value=0, max_value=100, step=5),
+        BATCH_INPUT_COLS[12]: NumberCol(min_value=0, max_value=100, step=5),
+        BATCH_INPUT_COLS[13]: NumberCol(min_value=0, max_value=100, step=5),
+        BATCH_INPUT_COLS[14]: CheckCol(),
+        BATCH_INPUT_COLS[15]: SelectCol(options=["Linear", "Seasonal"]),
+        BATCH_INPUT_COLS[16]: NumberCol(min_value=0, max_value=1000, step=10),
+        BATCH_INPUT_COLS[17]: NumberCol(min_value=1, max_value=52, step=1),
+        BATCH_INPUT_COLS[18]: SelectCol(options=["Very Steep", "Steep", "~Flat"]),
+        BATCH_INPUT_COLS[19]: NumberCol(min_value=0, max_value=1000, step=10),
+        BATCH_INPUT_COLS[20]: NumberCol(min_value=10, max_value=1000, step=10),
+        BATCH_INPUT_COLS[21]: NumberCol(min_value=0, max_value=50, step=5),
+        BATCH_INPUT_COLS[22]: NumberCol(min_value=1, max_value=10000, step=1),
+        BATCH_INPUT_COLS[23]: NumberCol(min_value=1, max_value=5000, step=1),
+        BATCH_INPUT_COLS[24]: NumberCol(min_value=0, max_value=100, step=5),
+    }
+    for c in BATCH_OUTPUT_COLS:
+        col_config[c] = NumberCol(disabled=True)
+
+    def _apply_editor_state(source_df):
+        df = source_df.copy().reset_index(drop=True)
+        edits = st.session_state.get("batch_editor", {}) or {}
+        for idx_key, changes in (edits.get("edited_rows") or {}).items():
+            idx = int(idx_key)
+            for col, val in changes.items():
+                if 0 <= idx < len(df):
+                    df.at[idx, col] = val
+        for row in (edits.get("added_rows") or []):
+            df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+        for idx in sorted([int(i) for i in (edits.get("deleted_rows") or [])], reverse=True):
+            if 0 <= idx < len(df):
+                df = df.drop(idx).reset_index(drop=True)
+        return df
+
+    def _reset_batch():
+        st.session_state.batch_df = _batch_default_rows()
+        st.session_state.pop("batch_editor", None)
+        st.session_state.pop("batch_results", None)
+
+    def _duplicate_last_row():
+        current = _apply_editor_state(st.session_state.batch_df[BATCH_INPUT_COLS])
+        if len(current) == 0:
+            return
+        new_row = current.iloc[-1].copy()
+        new_row[BATCH_INPUT_COLS[0]] = str(new_row[BATCH_INPUT_COLS[0]]) + " (copy)"
+        st.session_state.batch_df = pd.concat(
+            [current, pd.DataFrame([new_row])], ignore_index=True)
+        st.session_state.pop("batch_editor", None)
+
+    b1, b2, b3 = st.columns([1, 1, 1])
+    b1.button("🔄 Reset to 9-preset baseline", use_container_width=True, on_click=_reset_batch)
+    b2.button("➕ Duplicate last row", use_container_width=True, on_click=_duplicate_last_row)
+    run_clicked = b3.button("▶️ Run all scenarios", use_container_width=True, type="primary")
+
+    input_only_df = st.session_state.batch_df[BATCH_INPUT_COLS].copy()
+    edited = st.data_editor(
+        input_only_df,
+        column_config={k: v for k, v in col_config.items() if k in BATCH_INPUT_COLS},
+        num_rows="dynamic",
+        use_container_width=True,
+        height=min(600, 40 + len(input_only_df) * 35),
+        key="batch_editor",
+    )
+
+    if run_clicked:
+        results = []
+        progress = st.progress(0.0, text="Running scenarios…")
+        total = len(edited)
+        for i, (_, row) in enumerate(edited.iterrows()):
+            try:
+                out = _run_one_scenario_n(row)
+            except Exception as e:
+                out = {c: None for c in BATCH_OUTPUT_COLS}
+                out[BATCH_OUTPUT_COLS[0]] = None
+                st.warning(f"Row {i+1} failed: {e}")
+            results.append(out)
+            progress.progress((i + 1) / max(total, 1), text=f"Running scenario {i+1}/{total}…")
+        progress.empty()
+        results_df = pd.DataFrame(results)
+        st.session_state.batch_results = pd.concat(
+            [edited.reset_index(drop=True), results_df.reset_index(drop=True)], axis=1)
+
+    if "batch_results" in st.session_state:
+        st.markdown("### Results")
+        st.dataframe(
+            st.session_state.batch_results,
+            use_container_width=True,
+            height=min(600, 40 + len(st.session_state.batch_results) * 35),
+            column_config=col_config,
+        )
+
+        xlsx_buf = io.BytesIO()
+        with pd.ExcelWriter(xlsx_buf, engine="openpyxl") as xw:
+            st.session_state.batch_results.to_excel(xw, index=False, sheet_name="Batch")
+        st.download_button(
+            "📥 Download results as Excel (inputs + outputs)",
+            data=xlsx_buf.getvalue(),
+            file_name=f"sc_batch_nstores_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    st.markdown("---")
+    with st.expander("📤 Upload a previously-saved batch Excel file to restore the table"):
+        st.caption("Upload the .xlsx file you downloaded earlier. Input columns are "
+                   "picked up; output columns are ignored and recomputed when you click Run.")
+        uploaded = st.file_uploader("Choose an .xlsx file", type=["xlsx"], key="batch_upload")
+        if uploaded is not None and st.button("Load from uploaded file"):
+            try:
+                loaded = pd.read_excel(uploaded, sheet_name=0)
+                defaults = _batch_default_rows().iloc[0]
+                for c in BATCH_INPUT_COLS:
+                    if c not in loaded.columns:
+                        loaded[c] = defaults[c]
+                st.session_state.batch_df = loaded[BATCH_INPUT_COLS].copy()
+                st.session_state.pop("batch_editor", None)
+                st.session_state.pop("batch_results", None)
+                st.success(f"Loaded {len(loaded)} scenarios. Click 'Run all scenarios'.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to parse Excel file: {e}")
+
+
+# ════════════════════════════════════════════════════════════════
+# UI — mode switch
+# ════════════════════════════════════════════════════════════════
+
+with st.sidebar:
+    app_mode = st.radio("App mode", ["Single Scenario", "Batch Comparison"],
+                        horizontal=True, key="app_mode",
+                        help="Single = full week-by-week simulator with charts. "
+                             "Batch = table of scenarios run in parallel, exportable.")
+
+if app_mode == "Batch Comparison":
+    render_batch_ui_n()
+    st.stop()
+
 
 st.title("🏭 Supply Chain Agility Simulator — N stores")
 st.caption("Parametric version with N stores and stochastic per-store demand (Poisson). "
