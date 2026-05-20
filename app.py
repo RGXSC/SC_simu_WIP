@@ -109,7 +109,7 @@ _DEFAULTS = {
     "order_freq": 1,
     "total_stock": 1500,
     "store_pct": 40, "wh_pct": 20, "semi_pct": 10,
-    "store_a_pct": 60, "smart_distrib": True,
+    "n_stores": 2, "rng_seed": 42, "smart_distrib": True,
     "demand_shape": DEMAND_SHAPES[0],
     "app_mode": "Single Scenario",
     # "kickstart": False,  # removed in v3
@@ -218,11 +218,61 @@ def recommend_initial_stock(shape: str, weeks: int, coverage: int, *,
 # SIMULATION ENGINE — pure function, cached by Streamlit
 # ════════════════════════════════════════════════════════════════
 
+def _smart_alloc_n(ship_out, stores_arr, dist_pipes, forecast_per_store):
+    """
+    Water-fill `ship_out` units across N stores to equalise weeks-of-cover.
+    `stores_arr` : np.array of length N (current store stock)
+    `dist_pipes` : list of N lists (each store's distribution pipe)
+    `forecast_per_store` : np.array of length N (weekly demand expected per store)
+    Returns an integer np.array of length N summing exactly to int(ship_out).
+    """
+    n = len(stores_arr)
+    allocs = np.zeros(n, dtype=float)
+    if ship_out <= 0 or n == 0:
+        return allocs.astype(int)
+
+    eps = 1e-6
+    fcst = np.maximum(forecast_per_store, eps)
+    ip = stores_arr + np.array([sum(dp) for dp in dist_pipes], dtype=float)
+    cov = ip / fcst
+    order = np.argsort(cov)
+    cov_sorted = cov[order].copy()
+    fcst_sorted = fcst[order]
+
+    remaining = float(ship_out)
+    for k in range(n - 1):
+        delta = cov_sorted[k + 1] - cov_sorted[k]
+        if delta <= 0:
+            continue
+        cost = delta * fcst_sorted[:k + 1].sum()
+        if cost <= remaining + eps:
+            for j in range(k + 1):
+                allocs[order[j]] += delta * fcst_sorted[j]
+            remaining -= cost
+            cov_sorted[:k + 1] = cov_sorted[k + 1]
+        else:
+            for j in range(k + 1):
+                allocs[order[j]] += remaining * fcst_sorted[j] / fcst_sorted[:k + 1].sum()
+            remaining = 0
+            break
+
+    if remaining > eps:
+        for j in range(n):
+            allocs[order[j]] += remaining * fcst_sorted[j] / fcst.sum()
+
+    int_allocs = np.round(allocs).astype(int)
+    diff = int(ship_out) - int(int_allocs.sum())
+    if diff != 0:
+        biggest = int(np.argmax(fcst))
+        int_allocs[biggest] += diff
+    return int_allocs
+
+
 @st.cache_data
 def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
                    order_freq, mat_lt, semi_lt, fp_lt, dist_lt,
                    cap_start, cap_ramp, base_forecast,
-                   price, var_cost, fixed_pct, store_a_pct, smart_distrib,
+                   price, var_cost, fixed_pct, n_stores, rng_seed, smart_distrib,
                    debug=False,
                    custom_demand=None,
                    planner_curve=None):
@@ -295,8 +345,8 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
     """
     phys_lt = mat_lt + semi_lt + fp_lt + dist_lt
     coverage = phys_lt + order_freq
-    pct_a = store_a_pct / 100.0
-    pct_b = 1.0 - pct_a
+    n_stores = int(max(1, n_stores))
+    rng = np.random.default_rng(int(rng_seed))
 
     # Per-stage downstream coverages (how many weeks of demand each stage
     # must keep covered DOWNSTREAM of its own push point, including freq).
@@ -315,15 +365,19 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
             demand[w] = base_forecast
 
     # --- Pipes (index 0 = front, about to arrive; index -1 = back, just entered) ---
-    mat_pipe    = [0.0] * max(1, mat_lt)
-    semi_pipe   = [0.0] * max(1, semi_lt)
-    fp_pipe     = [0.0] * max(1, fp_lt)
-    dist_pipe_a = [0.0] * max(1, dist_lt)
-    dist_pipe_b = [0.0] * max(1, dist_lt)
+    mat_pipe   = [0.0] * max(1, mat_lt)
+    semi_pipe  = [0.0] * max(1, semi_lt)
+    fp_pipe    = [0.0] * max(1, fp_lt)
+    dist_pipes = [[0.0] * max(1, dist_lt) for _ in range(n_stores)]
 
     # --- Buffers ---
-    store_a = float(init_store) / 2.0
-    store_b = float(init_store) / 2.0
+    # Stores: split init_store equally across N stores (any remainder goes
+    # to the first few stores so the integer total is preserved).
+    base_each = int(init_store) // n_stores
+    rem       = int(init_store) - base_each * n_stores
+    stores = np.full(n_stores, float(base_each))
+    if rem > 0:
+        stores[:rem] += 1.0
     raw_mat = float(init_rawmat)
     semi    = float(init_semi)
     cw      = float(init_cw)
@@ -377,24 +431,28 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
     # --- W0 initial state ---
     s0 = {
         'week': 0,
-        'demand': 0, 'demand_a': 0, 'demand_b': 0,
+        'demand': 0,
         'forecast': base_forecast,
         'mat_arr': 0, 'semi_arr': 0, 'fp_arr': 0,
-        'dist_arr_a': 0, 'dist_arr_b': 0, 'dist_arr': 0,
-        'sales_a': 0, 'sales_b': 0, 'sales': 0,
-        'missed_a': 0, 'missed_b': 0, 'missed': 0,
-        'store_a': store_a, 'store_b': store_b, 'store_stock': store_a + store_b,
+        'dist_arr': 0,
+        'sales': 0, 'missed': 0,
+        'stores': stores.tolist(), 'store_stock': float(stores.sum()),
+        'stores_min': float(stores.min()), 'stores_max': float(stores.max()),
+        'stores_mean': float(stores.mean()), 'stores_std': float(stores.std()),
+        'stores_w_stockout': 0,
+        'per_store_dem': [0] * n_stores,
+        'per_store_sales': [0] * n_stores,
+        'per_store_missed': [0] * n_stores,
         'supplier_shipped': 0, 'supplier_cap': cap_start,
         'raw_mat_before_prod': raw_mat, 'raw_mat_stock': raw_mat,
         'semi_input': 0, 'semi_cap': cap_start, 'semi_stock': semi,
         'fp_input': 0, 'fp_cap': cap_start,
         'cw_shipped': 0, 'cw_stock': cw,
-        'alloc_a': 0, 'alloc_b': 0,
-        'mat_pipe':    list(mat_pipe),
-        'semi_pipe':   list(semi_pipe),
-        'fp_pipe':     list(fp_pipe),
-        'dist_pipe_a': list(dist_pipe_a),
-        'dist_pipe_b': list(dist_pipe_b),
+        'allocs': [0] * n_stores,
+        'mat_pipe':   list(mat_pipe),
+        'semi_pipe':  list(semi_pipe),
+        'fp_pipe':    list(fp_pipe),
+        'dist_pipes': [list(dp) for dp in dist_pipes],
         'order': 0, 'order_semi': 0, 'order_fp': 0, 'order_ship': 0,
         'pending': 0, 'backlog': 0,
         'semi_backlog': 0, 'fp_backlog': 0, 'ship_backlog': 0,
@@ -411,8 +469,12 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
     for w in range(1, weeks + 1):
         s = {'week': w}
         dem_total = demand[w]
-        dem_a = round(dem_total * pct_a)
-        dem_b = dem_total - dem_a
+        # Multinomial split: aggregate stays exactly equal to dem_total, but
+        # each store sees a stochastic share with mean dem_total / n_stores.
+        if dem_total > 0:
+            per_store_dem = rng.multinomial(int(dem_total), [1.0 / n_stores] * n_stores)
+        else:
+            per_store_dem = np.zeros(n_stores, dtype=int)
 
         # Forecast updates only at review weeks (periodic-review blind between)
         if w in order_weeks:
@@ -420,46 +482,43 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
             if smart_distrib and not smart_discovered:
                 smart_discovered = True
         s['demand'] = dem_total
-        s['demand_a'] = dem_a
-        s['demand_b'] = dem_b
         s['forecast'] = round(ff, 1)
 
         # 1. Arrivals — clear pipe fronts
         m_arr  = mat_pipe[0]
         sm_arr = semi_pipe[0]
         fp_arr = fp_pipe[0]
-        da_arr = dist_pipe_a[0]
-        db_arr = dist_pipe_b[0]
-        d_arr_total = da_arr + db_arr
+        store_arrivals = np.array([dp[0] for dp in dist_pipes], dtype=float)
+        d_arr_total = float(store_arrivals.sum())
         mat_pipe[0] = 0.0; semi_pipe[0] = 0.0; fp_pipe[0] = 0.0
-        dist_pipe_a[0] = 0.0; dist_pipe_b[0] = 0.0
-        s['mat_arr']    = round(m_arr, 1)
-        s['semi_arr']   = round(sm_arr, 1)
-        s['fp_arr']     = round(fp_arr, 1)
-        s['dist_arr_a'] = round(da_arr, 1)
-        s['dist_arr_b'] = round(db_arr, 1)
-        s['dist_arr']   = round(d_arr_total, 1)
+        for dp in dist_pipes:
+            dp[0] = 0.0
+        s['mat_arr']  = round(m_arr, 1)
+        s['semi_arr'] = round(sm_arr, 1)
+        s['fp_arr']   = round(fp_arr, 1)
+        s['dist_arr'] = round(d_arr_total, 1)
         cas += d_arr_total
 
-        # 2. Store sales (per store)
-        avail_a = store_a + da_arr
-        sales_a = min(dem_a, avail_a)
-        missed_a = max(0, dem_a - sales_a)
-        store_a = avail_a - sales_a
+        # 2. Store sales (per store, vectorised)
+        available = stores + store_arrivals
+        per_store_sales = np.minimum(per_store_dem.astype(float), available)
+        per_store_missed = per_store_dem.astype(float) - per_store_sales
+        stores = available - per_store_sales
 
-        avail_b = store_b + db_arr
-        sales_b = min(dem_b, avail_b)
-        missed_b = max(0, dem_b - sales_b)
-        store_b = avail_b - sales_b
-
-        sales = sales_a + sales_b
-        missed = missed_a + missed_b
+        sales = float(per_store_sales.sum())
+        missed = float(per_store_missed.sum())
         s.update({
-            'store_a': round(store_a, 1), 'store_b': round(store_b, 1),
-            'sales_a': round(sales_a, 1), 'sales_b': round(sales_b, 1),
-            'missed_a': round(missed_a, 1), 'missed_b': round(missed_b, 1),
+            'stores': [round(x, 1) for x in stores.tolist()],
+            'store_stock': round(float(stores.sum()), 1),
+            'stores_min':  round(float(stores.min()), 1),
+            'stores_max':  round(float(stores.max()), 1),
+            'stores_mean': round(float(stores.mean()), 2),
+            'stores_std':  round(float(stores.std()), 2),
+            'stores_w_stockout': int((per_store_missed > 0.5).sum()),
+            'per_store_dem':    per_store_dem.astype(int).tolist(),
+            'per_store_sales':  [round(x, 1) for x in per_store_sales.tolist()],
+            'per_store_missed': [round(x, 1) for x in per_store_missed.tolist()],
             'sales': round(sales, 1), 'missed': round(missed, 1),
-            'store_stock': round(store_a + store_b, 1),
         })
 
         # 3. Arrivals update buffers
@@ -520,24 +579,22 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
                     planner_factor = 1.0
                 planner_factor_week = w
 
-            existing_sup  = (store_a + store_b
+            store_sum  = float(stores.sum())
+            dist_total = sum(sum(dp) for dp in dist_pipes)
+            existing_sup  = (store_sum
                            + sum(mat_pipe) + raw_mat
                            + sum(semi_pipe) + semi
                            + sum(fp_pipe) + cw
-                           + sum(dist_pipe_a) + sum(dist_pipe_b)
-                           + pb)
-            existing_semi = (store_a + store_b
+                           + dist_total + pb)
+            existing_semi = (store_sum
                            + sum(semi_pipe) + semi
                            + sum(fp_pipe) + cw
-                           + sum(dist_pipe_a) + sum(dist_pipe_b)
-                           + semi_backlog)
-            existing_fp   = (store_a + store_b
+                           + dist_total + semi_backlog)
+            existing_fp   = (store_sum
                            + sum(fp_pipe) + cw
-                           + sum(dist_pipe_a) + sum(dist_pipe_b)
-                           + fp_backlog)
-            existing_ship = (store_a + store_b
-                           + sum(dist_pipe_a) + sum(dist_pipe_b)
-                           + ship_backlog)
+                           + dist_total + fp_backlog)
+            existing_ship = (store_sum
+                           + dist_total + ship_backlog)
 
             if seasonal_mode:
                 tgt_sup  = _lookahead_sum(planner_curve_internal, w + 1, w + cov_sup)
@@ -560,32 +617,30 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
             ps_gaps = {'sup': 0.0, 'semi': 0.0, 'fp': 0.0, 'ship': 0.0}
 
             # Per-store gap adjustment: pooled targets can miss the case where
-            # one store starves while another has surplus. With smart distribution,
-            # the planner's expected allocation of the common upstream pool is
-            # NOT a naive pct split — it's the cover-equalising allocation that
-            # the CW push step will actually do later. We compute that ideal
-            # share here so ordering and execution use the same logic.
-            if smart_distrib and pct_a > 0 and pct_b > 0:
+            # some stores starve while others have surplus. With smart
+            # distribution, the planner's expected allocation of the common
+            # upstream pool is the cover-equalising allocation that the CW
+            # push step will actually do later. Generalised to N stores via
+            # water-filling: each store's expected share of the pool is what
+            # raises it to the equal-cover line, clipped to [0, common_pool].
+            if smart_distrib and n_stores > 1:
+                own = stores + np.array([sum(dp) for dp in dist_pipes], dtype=float)
+
                 def _ps_gap(cov_x, common_pool):
                     if seasonal_mode:
                         dx = _lookahead_sum(planner_curve_internal, w + 1, w + cov_x)
                     else:
                         dx = ff * cov_x
-                    a0 = store_a + sum(dist_pipe_a)
-                    b0 = store_b + sum(dist_pipe_b)
-                    total_avail = a0 + b0 + common_pool
-                    # Smart's target: equal cover ⇒ each store gets pct × total.
-                    # share_a = (pct_a × total) − A's already-dedicated stock.
-                    # Clip to [0, common_pool] because smart can only ALLOCATE
-                    # the common_pool (it cannot move units already at B's store
-                    # to A, so negative shares are impossible).
-                    ideal_share_a = pct_a * total_avail - a0
-                    share_a = max(0.0, min(common_pool, ideal_share_a))
-                    a_supply = a0 + share_a
-                    b_supply = total_avail - a_supply
-                    a_gap = max(0.0, pct_a * dx - a_supply)
-                    b_gap = max(0.0, pct_b * dx - b_supply)
-                    return a_gap + b_gap
+                    total_avail = float(own.sum()) + float(common_pool)
+                    target = total_avail / n_stores
+                    raw_shares = np.maximum(0.0, target - own)
+                    s_sum = float(raw_shares.sum())
+                    if s_sum > common_pool + 1e-9 and s_sum > 0:
+                        raw_shares = raw_shares * (common_pool / s_sum)
+                    supply = own + raw_shares
+                    dx_per = dx / n_stores
+                    gaps = np.maximum(0.0, dx_per - supply)
+                    return float(gaps.sum())
 
                 pool_ship = 0
                 pool_fp   = sum(fp_pipe) + cw
@@ -701,48 +756,31 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
         s['ship_backlog'] = round(ship_backlog, 1)
 
         if ship_out > 0:
+            fcst_per_store = np.full(n_stores, max(ff / n_stores, 0.01))
             if smart_distrib and smart_discovered:
-                # Smart: fill worst-covered store first to equalize weeks-of-cover
-                dem_a_wk = max(ff * pct_a, 0.01)
-                dem_b_wk = max(ff * pct_b, 0.01)
-                cover_a = (store_a + sum(dist_pipe_a)) / dem_a_wk
-                cover_b = (store_b + sum(dist_pipe_b)) / dem_b_wk
-                if cover_a < cover_b:
-                    gap = math.ceil(max(0, (cover_b - cover_a) * dem_a_wk))
-                    priority_a = min(ship_out, gap)
-                    remaining = ship_out - priority_a
-                    alloc_a = priority_a + round(remaining * pct_a)
-                    alloc_b = ship_out - alloc_a
-                elif cover_b < cover_a:
-                    gap = math.ceil(max(0, (cover_a - cover_b) * dem_b_wk))
-                    priority_b = min(ship_out, gap)
-                    remaining = ship_out - priority_b
-                    alloc_b = priority_b + round(remaining * pct_b)
-                    alloc_a = ship_out - alloc_b
-                else:
-                    alloc_a = round(ship_out * pct_a)
-                    alloc_b = ship_out - alloc_a
+                # Smart: water-fill to equalise weeks-of-cover across stores
+                allocs = _smart_alloc_n(ship_out, stores, dist_pipes, fcst_per_store)
             else:
-                # Push or smart-not-yet-discovered: 50/50 blind
-                alloc_a = round(ship_out * 0.5)
-                alloc_b = ship_out - alloc_a
+                # Push (or smart-not-yet-discovered): equal split, remainder to first
+                base = int(ship_out) // n_stores
+                allocs = np.full(n_stores, base, dtype=int)
+                rem_alloc = int(ship_out) - base * n_stores
+                if rem_alloc > 0:
+                    allocs[:rem_alloc] += 1
         else:
-            alloc_a = 0
-            alloc_b = 0
-        s['alloc_a'] = round(alloc_a, 1)
-        s['alloc_b'] = round(alloc_b, 1)
+            allocs = np.zeros(n_stores, dtype=int)
+        s['allocs'] = [int(x) for x in allocs.tolist()]
 
         # 9. Update pipes (shift, append new entrants)
-        mat_pipe    = mat_pipe[1:]    + [shipped]
-        semi_pipe   = semi_pipe[1:]   + [si]
-        fp_pipe     = fp_pipe[1:]     + [fi]
-        dist_pipe_a = dist_pipe_a[1:] + [alloc_a]
-        dist_pipe_b = dist_pipe_b[1:] + [alloc_b]
-        s['mat_pipe']    = [round(x, 1) for x in mat_pipe]
-        s['semi_pipe']   = [round(x, 1) for x in semi_pipe]
-        s['fp_pipe']     = [round(x, 1) for x in fp_pipe]
-        s['dist_pipe_a'] = [round(x, 1) for x in dist_pipe_a]
-        s['dist_pipe_b'] = [round(x, 1) for x in dist_pipe_b]
+        mat_pipe  = mat_pipe[1:]  + [shipped]
+        semi_pipe = semi_pipe[1:] + [si]
+        fp_pipe   = fp_pipe[1:]   + [fi]
+        for i in range(n_stores):
+            dist_pipes[i] = dist_pipes[i][1:] + [float(allocs[i])]
+        s['mat_pipe']   = [round(x, 1) for x in mat_pipe]
+        s['semi_pipe']  = [round(x, 1) for x in semi_pipe]
+        s['fp_pipe']    = [round(x, 1) for x in fp_pipe]
+        s['dist_pipes'] = [[round(x, 1) for x in dp] for dp in dist_pipes]
 
         # --- COST BOOKING — entering-stage convention ---
         # shipped units enter Material stage this week → book RM cost (50% VC)
@@ -761,24 +799,21 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
         if fp_active_from       is not None and w >= fp_active_from:       fn += 1
 
         # 11. Post-processing WIP (for display)
+        dist_total = sum(sum(dp) for dp in dist_pipes)
         total_wip = (sum(mat_pipe) + sum(semi_pipe) + sum(fp_pipe)
-                     + sum(dist_pipe_a) + sum(dist_pipe_b)
-                     + raw_mat + semi + cw + pb)
+                     + dist_total + raw_mat + semi + cw + pb)
         s['wip_total'] = round(total_wip, 1)
         s['pending']   = round(co - cas, 0)
         s['backlog']   = round(pb, 0)
         s['coverage']  = coverage
 
-        # Commentary
+        # Commentary (aggregate; per-store detail is in the zoom expander)
+        stockout_n = int((per_store_missed > 0.5).sum())
         parts = []
-        if missed_a > 0.5:
-            parts.append(f"A: lost {missed_a:.0f}/{dem_a:.0f}.")
+        if missed > 0.5:
+            parts.append(f"Sales {sales:.0f}/{dem_total} ({stockout_n}/{n_stores} stores w/ stockout).")
         else:
-            parts.append(f"A: sold {sales_a:.0f}/{dem_a:.0f}, stk {store_a:.0f}.")
-        if missed_b > 0.5:
-            parts.append(f"B: lost {missed_b:.0f}/{dem_b:.0f}.")
-        else:
-            parts.append(f"B: sold {sales_b:.0f}/{dem_b:.0f}, stk {store_b:.0f}.")
+            parts.append(f"Sold {sales:.0f}/{dem_total}, stores hold {float(stores.sum()):.0f}.")
         if od_sup > 0:
             parts.append(f"ORDER {od_sup:.0f}.")
         if od_semi > 0 or od_fp > 0 or od_ship > 0:
@@ -788,13 +823,13 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
         if si > 0.5: parts.append(f"Semi proc {si:.0f}.")
         if fi > 0.5: parts.append(f"FP proc {fi:.0f}.")
         if ship_out > 0.5:
-            mode = "smart" if (smart_distrib and smart_discovered) else "push 50/50"
-            parts.append(f"WH→A:{alloc_a:.0f} B:{alloc_b:.0f} ({mode}).")
+            mode = "smart water-fill" if (smart_distrib and smart_discovered) else "equal split"
+            parts.append(f"CW→stores {ship_out:.0f} ({mode}).")
         s['comment'] = " ".join(parts)
 
         # Debug assertions — conservation within single-week state
         if debug:
-            assert store_a >= -0.5 and store_b >= -0.5, f"W{w}: negative store stock"
+            assert (stores >= -0.5).all(), f"W{w}: negative store stock"
             assert raw_mat >= -0.5 and semi >= -0.5 and cw >= -0.5, f"W{w}: negative buffer"
             assert pb >= -0.5, f"W{w}: negative backlog"
             assert semi_backlog >= -0.5, f"W{w}: negative semi_backlog"
@@ -810,9 +845,9 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
         init_units = init_store + init_cw + init_semi + init_rawmat
         total_shipped = sum(s['supplier_shipped'] for s in states)
         total_sales = sum(s['sales'] for s in states)
-        end_stock_u = states[-1]['store_a'] + states[-1]['store_b'] + cw + semi + raw_mat
+        end_stock_u = float(stores.sum()) + cw + semi + raw_mat
         end_pipe_u = (sum(mat_pipe) + sum(semi_pipe) + sum(fp_pipe)
-                      + sum(dist_pipe_a) + sum(dist_pipe_b))
+                      + sum(sum(dp) for dp in dist_pipes))
         lhs = init_units + total_shipped
         rhs = total_sales + end_stock_u + end_pipe_u
         assert abs(lhs - rhs) < 2.0, f"Unit conservation failed: {lhs:.1f} != {rhs:.1f}"
@@ -834,11 +869,11 @@ def _value_stock(store, cw_, semi_, rm_, var_cost):
 
 def _value_pipes(state, var_cost):
     """Valorize in-transit pipe units by stage position."""
-    return (sum(state.get('mat_pipe', [0]))    * var_cost * VALOR_RAW_MAT
-          + sum(state.get('semi_pipe', [0]))   * var_cost * VALOR_SEMI
-          + sum(state.get('fp_pipe', [0]))     * var_cost * VALOR_FINISHED
-          + sum(state.get('dist_pipe_a', [0])) * var_cost * VALOR_FINISHED
-          + sum(state.get('dist_pipe_b', [0])) * var_cost * VALOR_FINISHED)
+    dist_units = sum(sum(dp) for dp in state.get('dist_pipes', []))
+    return (sum(state.get('mat_pipe', [0]))  * var_cost * VALOR_RAW_MAT
+          + sum(state.get('semi_pipe', [0])) * var_cost * VALOR_SEMI
+          + sum(state.get('fp_pipe', [0]))   * var_cost * VALOR_FINISHED
+          + dist_units                       * var_cost * VALOR_FINISHED)
 
 
 def compute_kpis(states, price, var_cost, fixed_pct, base_forecast, weeks,
@@ -885,18 +920,18 @@ def compute_kpis(states, price, var_cost, fixed_pct, base_forecast, weeks,
 
     # End-of-sim stock & pipe values (valorized by stage)
     last = states[-1] if states else {}
-    end_store    = last.get('store_a', 0) + last.get('store_b', 0)
+    end_store    = last.get('store_stock', 0)
     end_cw       = last.get('cw_stock', 0)
     end_semi     = last.get('semi_stock', 0)
     end_rawmat   = last.get('raw_mat_stock', 0)
     end_stock_units = end_store + end_cw + end_semi + end_rawmat
     end_stock_value = _value_stock(end_store, end_cw, end_semi, end_rawmat, var_cost)
 
+    end_dist_units = sum(sum(dp) for dp in last.get('dist_pipes', []))
     end_pipe_units = (sum(last.get('mat_pipe', [0]))
                     + sum(last.get('semi_pipe', [0]))
                     + sum(last.get('fp_pipe', [0]))
-                    + sum(last.get('dist_pipe_a', [0]))
-                    + sum(last.get('dist_pipe_b', [0])))
+                    + end_dist_units)
     end_pipe_value = _value_pipes(last, var_cost)
 
     # Efficiency — how much of "system throughput" actually sold?
@@ -931,10 +966,7 @@ def compute_kpis(states, price, var_cost, fixed_pct, base_forecast, weeks,
         'end_pipe_units':  end_pipe_units,
         'store_end':       end_store,
         'lost_rev':        tm * price,
-        'missed_a': sum(s['missed_a'] for s in states),
-        'missed_b': sum(s['missed_b'] for s in states),
-        'sales_a':  sum(s['sales_a']  for s in states),
-        'sales_b':  sum(s['sales_b']  for s in states),
+        'stores_w_stockout_total': sum(s.get('stores_w_stockout', 0) for s in states),
         'useful_pct':   useful_pct,  'useless_pct':   useless_pct,
         'useful_units': ts,          'useless_units': useless_units,
         'total_system_units': total_system_units,
@@ -973,8 +1005,7 @@ def cumulative_kpis(states, week, price, var_cost, fixed_pct, base_forecast, tot
         'sales': ts, 'missed': tm, 'demand': td, 'revenue': rev,
         'svc_level': ts / td if td > 0 else 0, 'margin': mg,
         'stockout_wks': sum(1 for s in sub if s['missed'] > 0.5),
-        'missed_a': sum(s['missed_a'] for s in sub),
-        'missed_b': sum(s['missed_b'] for s in sub),
+        'stores_w_stockout': sum(s.get('stores_w_stockout', 0) for s in sub),
         'useful_pct': useful_pct, 'useless_pct': 100 - useful_pct,
     }
 
@@ -989,12 +1020,12 @@ def reconciliation_report(states, kpis, params):
     total_shipped = sum(s['supplier_shipped'] for s in states)
     total_sales   = sum(s['sales'] for s in states)
     last = states[-1]
-    end_stock_u = (last['store_a'] + last['store_b']
+    end_stock_u = (last.get('store_stock', 0)
                  + last.get('cw_stock', 0) + last.get('semi_stock', 0)
                  + last.get('raw_mat_stock', 0))
-    end_pipe_u = (sum(last.get('mat_pipe', []))    + sum(last.get('semi_pipe', []))
-                + sum(last.get('fp_pipe', []))     + sum(last.get('dist_pipe_a', []))
-                + sum(last.get('dist_pipe_b', [])))
+    end_dist_u = sum(sum(dp) for dp in last.get('dist_pipes', []))
+    end_pipe_u = (sum(last.get('mat_pipe', [])) + sum(last.get('semi_pipe', []))
+                + sum(last.get('fp_pipe', []))  + end_dist_u)
 
     checks = []
 
@@ -1041,7 +1072,7 @@ def reconciliation_report(states, kpis, params):
     ))
 
     # Check 5: no negative stocks across the run
-    any_neg = any(s['store_a'] < -0.5 or s['store_b'] < -0.5
+    any_neg = any(any(x < -0.5 for x in s.get('stores', []))
                   or s.get('cw_stock', 0) < -0.5 or s.get('semi_stock', 0) < -0.5
                   or s.get('raw_mat_stock', 0) < -0.5
                   for s in states)
@@ -1288,16 +1319,20 @@ def make_sc_html(state: dict, params: dict) -> str:
     if semi_weeks: semi_weeks[-1] = semi_weeks[-1] + semi
     if fp_weeks:   fp_weeks[-1]   = fp_weeks[-1]   + cw
 
-    dist_a = _reversed(state.get('dist_pipe_a', []))
-    dist_b = _reversed(state.get('dist_pipe_b', []))
-    dist_combined = [dist_a[i] + dist_b[i] for i in range(len(dist_a))] if dist_a else []
+    # Sum across all N stores' distribution pipes
+    dist_pipes_state = state.get('dist_pipes', [])
+    if dist_pipes_state:
+        pipe_len = len(dist_pipes_state[0])
+        dist_combined = [sum(dp[i] for dp in dist_pipes_state) for i in range(pipe_len)]
+        dist_combined = list(reversed(dist_combined))
+    else:
+        dist_combined = []
 
     # WIP per band
-    wip_mat  = sum(state.get('mat_pipe', []))    + raw_mat
-    wip_semi = sum(state.get('semi_pipe', []))   + semi
-    wip_fp   = sum(state.get('fp_pipe', []))     + cw
-    wip_da   = sum(state.get('dist_pipe_a', []))
-    wip_db   = sum(state.get('dist_pipe_b', []))
+    wip_mat  = sum(state.get('mat_pipe', []))  + raw_mat
+    wip_semi = sum(state.get('semi_pipe', [])) + semi
+    wip_fp   = sum(state.get('fp_pipe', []))   + cw
+    wip_dist = sum(sum(dp) for dp in dist_pipes_state)
 
     # Stage columns
     mat_label  = f"Mat ({mat_lt}wk)"       if mat_lt <= 2 else f"Material ({mat_lt}wk)"
@@ -1315,20 +1350,22 @@ def make_sc_html(state: dict, params: dict) -> str:
         f'{band_header(dist_label, dist_band_w)}'
         f'<div>{boxes_row(dist_combined, box_w, box_h, proc_last=True, weeks_labels_start=mat_lt + semi_lt + fp_lt + 1)}</div>'
         f'<div style="display:flex;flex-direction:column;gap:3px;width:{dist_band_w}px;">'
-        f'{wip_label("WIP A", wip_da, dist_band_w)}'
-        f'{wip_label("WIP B", wip_db, dist_band_w)}'
+        f'{wip_label("WIP", wip_dist, dist_band_w)}'
         f'</div></div>'
     )
 
-    # Supplier + stacked stores
+    # Supplier + single aggregated stores card
+    n_stores_state = params.get('n_stores', len(state.get('stores', [1])))
     sup_html = supplier_card(state.get('backlog', 0), state.get('supplier_cap', 0), box_h)
-    store_a_html = store_card("A", state.get('store_a', 0), state.get('demand_a', 0),
-                              state.get('sales_a', 0), state.get('missed_a', 0))
-    store_b_html = store_card("B", state.get('store_b', 0), state.get('demand_b', 0),
-                              state.get('sales_b', 0), state.get('missed_b', 0))
+    store_label = f"Stores (×{n_stores_state})"
+    stores_html_card = store_card(store_label,
+                                  state.get('store_stock', 0),
+                                  state.get('demand', 0),
+                                  state.get('sales', 0),
+                                  state.get('missed', 0))
     stores_html = (
         f'<div style="display:flex;flex-direction:column;gap:6px;justify-content:center;'
-        f'align-self:stretch;">{store_a_html}{store_b_html}</div>'
+        f'align-self:stretch;">{stores_html_card}</div>'
     )
 
     main = (
@@ -1354,7 +1391,7 @@ def make_sc_html(state: dict, params: dict) -> str:
         f'<span style="font-size:12px;">{order_html}</span>'
         f'<span style="font-size:12px;color:{C_TXT};" title="Demand the planner aims to cover in the next LT+freq weeks. The supplier order = max(0, this − stores − all WIP − backlog).">Cover Tgt <b style="color:#1a2a40;">{state.get("target_sup", 0):.0f}</b></span>'
         f'<span style="font-size:12px;color:{C_TXT};">Forecast <b style="color:#1a2a40;">{state.get("forecast", 0):.0f}</b>/wk</span>'
-        f'<span style="font-size:12px;color:{C_TXT};">A:{params.get("store_a_pct", 60)}% B:{100 - params.get("store_a_pct", 60)}%</span>'
+        f'<span style="font-size:12px;color:{C_TXT};">Stores <b style="color:#1a2a40;">{params.get("n_stores", 2)}</b></span>'
         f'</div>'
     )
     comment = state.get('comment', '')
@@ -1486,7 +1523,6 @@ def apply_preset(lt_name: str, demand_kind: str, *,
     st.session_state["store_pct"]    = dist["store_pct"]
     st.session_state["wh_pct"]       = dist["wh_pct"]
     st.session_state["semi_pct"]     = dist["semi_pct"]
-    st.session_state["store_a_pct"]  = 60
     st.session_state["smart_distrib"] = True
 
     if demand_kind == "Flat":
@@ -1524,6 +1560,8 @@ import io
 BATCH_INPUT_COLS = [
     "Scenario\nLabel",
     "Sim\nWeeks",
+    "N\nStores",
+    "Seed",
     "Material\nLT (wk)",
     "Semi\nLT (wk)",
     "Finishing\nLT (wk)",
@@ -1533,7 +1571,6 @@ BATCH_INPUT_COLS = [
     "Init Store\n%",
     "Init WH\n%",
     "Init Semi\n%",
-    "Store A\n% demand",
     "Smart\nDistrib",
     "Demand\nShape",
     "Linear End\n(pcs/wk)",
@@ -1547,14 +1584,13 @@ BATCH_INPUT_COLS = [
     "Fixed Cost\n% of fcst rev",
 ]
 
-# Output column names (16, appended after Run).
+# Output column names (appended after Run).
 BATCH_OUTPUT_COLS = [
     "Revenue\n(€)",
     "Cumul Sales\n(pcs)",
     "Service\nLevel %",
     "Missed Total\n(pcs)",
-    "Missed A\n(pcs)",
-    "Missed B\n(pcs)",
+    "Store-Stockout\nEvents",
     "Stockout\nWeeks",
     "Init Stock\nValue (€)",
     "Total VC\n(€)",
@@ -1590,27 +1626,28 @@ def _batch_default_rows():
         rows.append({
             BATCH_INPUT_COLS[0]:  label,
             BATCH_INPUT_COLS[1]:  26,
-            BATCH_INPUT_COLS[2]:  lt["mat_lt"],
-            BATCH_INPUT_COLS[3]:  lt["semi_lt"],
-            BATCH_INPUT_COLS[4]:  lt["fp_lt"],
-            BATCH_INPUT_COLS[5]:  lt["dist_lt"],
-            BATCH_INPUT_COLS[6]:  lt["order_freq"],
-            BATCH_INPUT_COLS[7]:  stock,
-            BATCH_INPUT_COLS[8]:  dist["store_pct"],
-            BATCH_INPUT_COLS[9]:  dist["wh_pct"],
-            BATCH_INPUT_COLS[10]: dist["semi_pct"],
-            BATCH_INPUT_COLS[11]: 60,
-            BATCH_INPUT_COLS[12]: True,
-            BATCH_INPUT_COLS[13]: "Linear",
-            BATCH_INPUT_COLS[14]: lin_end,
-            BATCH_INPUT_COLS[15]: lin_wks,
-            BATCH_INPUT_COLS[16]: "Steep",
-            BATCH_INPUT_COLS[17]: 100,
+            BATCH_INPUT_COLS[2]:  2,         # N stores
+            BATCH_INPUT_COLS[3]:  42,        # Seed
+            BATCH_INPUT_COLS[4]:  lt["mat_lt"],
+            BATCH_INPUT_COLS[5]:  lt["semi_lt"],
+            BATCH_INPUT_COLS[6]:  lt["fp_lt"],
+            BATCH_INPUT_COLS[7]:  lt["dist_lt"],
+            BATCH_INPUT_COLS[8]:  lt["order_freq"],
+            BATCH_INPUT_COLS[9]:  stock,
+            BATCH_INPUT_COLS[10]: dist["store_pct"],
+            BATCH_INPUT_COLS[11]: dist["wh_pct"],
+            BATCH_INPUT_COLS[12]: dist["semi_pct"],
+            BATCH_INPUT_COLS[13]: True,
+            BATCH_INPUT_COLS[14]: "Linear",
+            BATCH_INPUT_COLS[15]: lin_end,
+            BATCH_INPUT_COLS[16]: lin_wks,
+            BATCH_INPUT_COLS[17]: "Steep",
             BATCH_INPUT_COLS[18]: 100,
-            BATCH_INPUT_COLS[19]: 20,
-            BATCH_INPUT_COLS[20]: 1000,
-            BATCH_INPUT_COLS[21]: 200,
-            BATCH_INPUT_COLS[22]: 45,
+            BATCH_INPUT_COLS[19]: 100,
+            BATCH_INPUT_COLS[20]: 20,
+            BATCH_INPUT_COLS[21]: 1000,
+            BATCH_INPUT_COLS[22]: 200,
+            BATCH_INPUT_COLS[23]: 45,
         })
     return pd.DataFrame(rows)
 
@@ -1618,27 +1655,28 @@ def _batch_default_rows():
 def _run_one_scenario(row):
     """Run one scenario row through the engine and return a dict of outputs."""
     w           = int(row[BATCH_INPUT_COLS[1]])
-    mat_lt      = int(row[BATCH_INPUT_COLS[2]])
-    semi_lt     = int(row[BATCH_INPUT_COLS[3]])
-    fp_lt       = int(row[BATCH_INPUT_COLS[4]])
-    dist_lt     = int(row[BATCH_INPUT_COLS[5]])
-    freq        = int(row[BATCH_INPUT_COLS[6]])
-    total_stock = int(row[BATCH_INPUT_COLS[7]])
-    sp          = int(row[BATCH_INPUT_COLS[8]])
-    wp          = int(row[BATCH_INPUT_COLS[9]])
-    sep         = int(row[BATCH_INPUT_COLS[10]])
-    a_pct       = int(row[BATCH_INPUT_COLS[11]])
-    smart       = bool(row[BATCH_INPUT_COLS[12]])
-    shape       = str(row[BATCH_INPUT_COLS[13]])
-    lin_end     = int(row[BATCH_INPUT_COLS[14]])
-    lin_wks     = int(row[BATCH_INPUT_COLS[15]])
-    seas_sub    = str(row[BATCH_INPUT_COLS[16]])
-    seas_avg    = int(row[BATCH_INPUT_COLS[17]])
-    cap_start   = int(row[BATCH_INPUT_COLS[18]])
-    cap_ramp    = float(row[BATCH_INPUT_COLS[19]]) / 100.0
-    price       = int(row[BATCH_INPUT_COLS[20]])
-    var_cost    = int(row[BATCH_INPUT_COLS[21]])
-    fixed_pct   = float(row[BATCH_INPUT_COLS[22]]) / 100.0
+    n_stores    = int(row[BATCH_INPUT_COLS[2]])
+    seed        = int(row[BATCH_INPUT_COLS[3]])
+    mat_lt      = int(row[BATCH_INPUT_COLS[4]])
+    semi_lt     = int(row[BATCH_INPUT_COLS[5]])
+    fp_lt       = int(row[BATCH_INPUT_COLS[6]])
+    dist_lt     = int(row[BATCH_INPUT_COLS[7]])
+    freq        = int(row[BATCH_INPUT_COLS[8]])
+    total_stock = int(row[BATCH_INPUT_COLS[9]])
+    sp          = int(row[BATCH_INPUT_COLS[10]])
+    wp          = int(row[BATCH_INPUT_COLS[11]])
+    sep         = int(row[BATCH_INPUT_COLS[12]])
+    smart       = bool(row[BATCH_INPUT_COLS[13]])
+    shape       = str(row[BATCH_INPUT_COLS[14]])
+    lin_end     = int(row[BATCH_INPUT_COLS[15]])
+    lin_wks     = int(row[BATCH_INPUT_COLS[16]])
+    seas_sub    = str(row[BATCH_INPUT_COLS[17]])
+    seas_avg    = int(row[BATCH_INPUT_COLS[18]])
+    cap_start   = int(row[BATCH_INPUT_COLS[19]])
+    cap_ramp    = float(row[BATCH_INPUT_COLS[20]]) / 100.0
+    price       = int(row[BATCH_INPUT_COLS[21]])
+    var_cost    = int(row[BATCH_INPUT_COLS[22]])
+    fixed_pct   = float(row[BATCH_INPUT_COLS[23]]) / 100.0
 
     init_store  = int(round(total_stock * sp / 100))
     init_cw     = int(round(total_stock * wp / 100))
@@ -1660,7 +1698,7 @@ def _run_one_scenario(row):
         fp_lt=fp_lt, dist_lt=dist_lt,
         cap_start=cap_start, cap_ramp=cap_ramp, base_forecast=BASE_FORECAST,
         price=price, var_cost=var_cost, fixed_pct=fixed_pct,
-        store_a_pct=a_pct, smart_distrib=smart,
+        n_stores=n_stores, rng_seed=seed, smart_distrib=smart,
         debug=False,
         custom_demand=tuple([0] + cd),
         planner_curve=tuple(pc) if pc is not None else None,
@@ -1673,18 +1711,17 @@ def _run_one_scenario(row):
         BATCH_OUTPUT_COLS[1]:  round(k["total_sales"]),
         BATCH_OUTPUT_COLS[2]:  round(k["svc_level"] * 100, 1),
         BATCH_OUTPUT_COLS[3]:  round(k["total_missed"]),
-        BATCH_OUTPUT_COLS[4]:  round(k["missed_a"]),
-        BATCH_OUTPUT_COLS[5]:  round(k["missed_b"]),
-        BATCH_OUTPUT_COLS[6]:  k["stockout_weeks"],
-        BATCH_OUTPUT_COLS[7]:  round(k["init_stock_value"]),
-        BATCH_OUTPUT_COLS[8]:  round(k["var_cost"]),
-        BATCH_OUTPUT_COLS[9]:  round(k["fixed"]),
-        BATCH_OUTPUT_COLS[10]: round(k["margin"]),
-        BATCH_OUTPUT_COLS[11]: round(k["margin_pct"] * 100, 1),
-        BATCH_OUTPUT_COLS[12]: round(k["end_stock_units"] + k["end_pipe_units"]),
-        BATCH_OUTPUT_COLS[13]: round(k["leftover_value"]),
-        BATCH_OUTPUT_COLS[14]: round(k["useful_pct"], 1),
-        BATCH_OUTPUT_COLS[15]: "✓" if reconciled else "✗",
+        BATCH_OUTPUT_COLS[4]:  k.get("stores_w_stockout_total", 0),
+        BATCH_OUTPUT_COLS[5]:  k["stockout_weeks"],
+        BATCH_OUTPUT_COLS[6]:  round(k["init_stock_value"]),
+        BATCH_OUTPUT_COLS[7]:  round(k["var_cost"]),
+        BATCH_OUTPUT_COLS[8]:  round(k["fixed"]),
+        BATCH_OUTPUT_COLS[9]:  round(k["margin"]),
+        BATCH_OUTPUT_COLS[10]: round(k["margin_pct"] * 100, 1),
+        BATCH_OUTPUT_COLS[11]: round(k["end_stock_units"] + k["end_pipe_units"]),
+        BATCH_OUTPUT_COLS[12]: round(k["leftover_value"]),
+        BATCH_OUTPUT_COLS[13]: round(k["useful_pct"], 1),
+        BATCH_OUTPUT_COLS[14]: "✓" if reconciled else "✗",
     }
 
 
@@ -1707,27 +1744,28 @@ def render_batch_ui():
     col_config = {
         BATCH_INPUT_COLS[0]:  TextCol(width="medium", pinned=True),
         BATCH_INPUT_COLS[1]:  NumberCol(min_value=13, max_value=52, step=1),
-        BATCH_INPUT_COLS[2]:  NumberCol(min_value=1, max_value=24, step=1),
-        BATCH_INPUT_COLS[3]:  NumberCol(min_value=1, max_value=12, step=1),
-        BATCH_INPUT_COLS[4]:  NumberCol(min_value=1, max_value=12, step=1),
+        BATCH_INPUT_COLS[2]:  NumberCol(min_value=2, max_value=500, step=1),     # N stores
+        BATCH_INPUT_COLS[3]:  NumberCol(min_value=0, max_value=10000, step=1),    # Seed
+        BATCH_INPUT_COLS[4]:  NumberCol(min_value=1, max_value=24, step=1),       # Material LT
         BATCH_INPUT_COLS[5]:  NumberCol(min_value=1, max_value=12, step=1),
-        BATCH_INPUT_COLS[6]:  NumberCol(min_value=1, max_value=4, step=1),
-        BATCH_INPUT_COLS[7]:  NumberCol(min_value=0, max_value=50000, step=50),
-        BATCH_INPUT_COLS[8]:  NumberCol(min_value=0, max_value=100, step=5),
-        BATCH_INPUT_COLS[9]:  NumberCol(min_value=0, max_value=100, step=5),
+        BATCH_INPUT_COLS[6]:  NumberCol(min_value=1, max_value=12, step=1),
+        BATCH_INPUT_COLS[7]:  NumberCol(min_value=1, max_value=12, step=1),
+        BATCH_INPUT_COLS[8]:  NumberCol(min_value=1, max_value=4, step=1),
+        BATCH_INPUT_COLS[9]:  NumberCol(min_value=0, max_value=50000, step=50),
         BATCH_INPUT_COLS[10]: NumberCol(min_value=0, max_value=100, step=5),
         BATCH_INPUT_COLS[11]: NumberCol(min_value=0, max_value=100, step=5),
-        BATCH_INPUT_COLS[12]: CheckCol(),
-        BATCH_INPUT_COLS[13]: SelectCol(options=["Linear", "Seasonal"]),
-        BATCH_INPUT_COLS[14]: NumberCol(min_value=0, max_value=1000, step=10),
-        BATCH_INPUT_COLS[15]: NumberCol(min_value=1, max_value=52, step=1),
-        BATCH_INPUT_COLS[16]: SelectCol(options=["Very Steep", "Steep", "~Flat"]),
-        BATCH_INPUT_COLS[17]: NumberCol(min_value=0, max_value=1000, step=10),
-        BATCH_INPUT_COLS[18]: NumberCol(min_value=10, max_value=1000, step=10),
-        BATCH_INPUT_COLS[19]: NumberCol(min_value=0, max_value=50, step=5),
-        BATCH_INPUT_COLS[20]: NumberCol(min_value=100, max_value=10000, step=100),
-        BATCH_INPUT_COLS[21]: NumberCol(min_value=10, max_value=5000, step=10),
-        BATCH_INPUT_COLS[22]: NumberCol(min_value=0, max_value=100, step=5),
+        BATCH_INPUT_COLS[12]: NumberCol(min_value=0, max_value=100, step=5),
+        BATCH_INPUT_COLS[13]: CheckCol(),
+        BATCH_INPUT_COLS[14]: SelectCol(options=["Linear", "Seasonal"]),
+        BATCH_INPUT_COLS[15]: NumberCol(min_value=0, max_value=1000, step=10),
+        BATCH_INPUT_COLS[16]: NumberCol(min_value=1, max_value=52, step=1),
+        BATCH_INPUT_COLS[17]: SelectCol(options=["Very Steep", "Steep", "~Flat"]),
+        BATCH_INPUT_COLS[18]: NumberCol(min_value=0, max_value=1000, step=10),
+        BATCH_INPUT_COLS[19]: NumberCol(min_value=10, max_value=1000, step=10),
+        BATCH_INPUT_COLS[20]: NumberCol(min_value=0, max_value=50, step=5),
+        BATCH_INPUT_COLS[21]: NumberCol(min_value=100, max_value=10000, step=100),
+        BATCH_INPUT_COLS[22]: NumberCol(min_value=10, max_value=5000, step=10),
+        BATCH_INPUT_COLS[23]: NumberCol(min_value=0, max_value=100, step=5),
     }
     # Mark output columns read-only with formatting
     for c in BATCH_OUTPUT_COLS:
@@ -1975,14 +2013,23 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
-    # --- Store demand split ---
-    st.markdown("### \U0001f3ea Store Demand Split")
-    store_a_pct = st.slider("Store A demand (%)", 0, 100, step=5, key="store_a_pct")
+    # --- Store network ---
+    st.markdown("### \U0001f3ea Store Network")
+    n_stores = st.select_slider("Number of stores",
+                                options=[2, 10, 50, 100, 200, 500],
+                                key="n_stores")
+    rng_seed = st.number_input("Random seed", min_value=0, max_value=10_000,
+                               step=1, key="rng_seed",
+                               help="Per-store demand is drawn from a Poisson-like split "
+                                    "(multinomial) of the aggregate. Same seed = same draws "
+                                    "every time — change to test a different random world.")
     smart_distrib = st.toggle("Smart Distribution (need-based)", key="smart_distrib")
     if smart_distrib:
-        st.caption(f"A: **{store_a_pct}%** B: **{100-store_a_pct}%** — Stores start 50/50, CW rebalances at first planning review")
+        st.caption(f"**{n_stores} stores**, equal initial split; CW water-fills each "
+                   f"week to equalise weeks-of-cover.")
     else:
-        st.caption(f"A: **{store_a_pct}%** B: **{100-store_a_pct}%** — Push 50/50 always")
+        st.caption(f"**{n_stores} stores**, equal initial split; CW pushes equal "
+                   f"shares each week (blind to per-store stock).")
 
     # --- Demand profile ---
     st.markdown("### \U0001f4c8 Demand Profile")
@@ -2170,7 +2217,7 @@ params = {
     'cap_start': cap_start, 'cap_ramp': cap_ramp,
     'base_forecast': BASE_FORECAST,
     'price': price, 'var_cost': var_cost, 'fixed_pct': fixed_pct,
-    'store_a_pct': store_a_pct, 'smart_distrib': smart_distrib,
+    'n_stores': n_stores, 'rng_seed': rng_seed, 'smart_distrib': smart_distrib,
     'debug': debug_mode,
     'custom_demand':  tuple(custom_demand),
     'planner_curve':  tuple(planner_curve) if planner_curve is not None else None,
@@ -2204,7 +2251,7 @@ st.markdown("# \U0001f3ed Supply Chain Agility Simulator — Advanced Stage Orde
 distrib_mode = "Smart" if smart_distrib else "Push 50/50"
 st.markdown(
     f"*LT = **{phys_lt}**wk | Coverage = **{coverage}**wk | "
-    f"Demand: **{demand_description}** | A: **{store_a_pct}%** / B: **{100-store_a_pct}%** | "
+    f"Demand: **{demand_description}** | **{n_stores}** stores | "
     f"{distrib_mode} · per-stage push policy at each review week*"
 )
 
@@ -2250,7 +2297,7 @@ def _kpi_card(label, value, color="#1a2a40"):
     return f'<div class="kpi-card"><div class="kpi-label">{label}</div><div class="kpi-value" style="color:{color};">{value}</div></div>'
 
 
-k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
+k1, k2, k3, k4, k5, k6 = st.columns(6)
 with k1:
     svc = cum['svc_level']
     c = "#c0392b" if svc < 0.6 else ("#d4850a" if svc < 0.85 else "#1a8a4a")
@@ -2260,13 +2307,16 @@ with k2:
 with k3:
     st.markdown(_kpi_card("Missed Total",   f"{round(cum['missed'], -1):,.0f}", "#c0392b"), unsafe_allow_html=True)
 with k4:
-    st.markdown(_kpi_card("Missed A",       f"{round(cum['missed_a'], -1):,.0f}", "#c0392b"), unsafe_allow_html=True)
+    # Stores-with-stockout: weekly events, summed up to current week (so the
+    # same store stocking out in 2 weeks counts twice). Useful as a relative
+    # stress indicator that scales with N.
+    sw = cum.get('stores_w_stockout', 0)
+    sw_clr = "#c0392b" if sw > 0 else "#1a8a4a"
+    st.markdown(_kpi_card("Store-Stockout Events", f"{sw:,}", sw_clr), unsafe_allow_html=True)
 with k5:
-    st.markdown(_kpi_card("Missed B",       f"{round(cum['missed_b'], -1):,.0f}", "#7b2d8e"), unsafe_allow_html=True)
-with k6:
     sc_clr = "#c0392b" if cum['stockout_wks'] > 0 else "#1a8a4a"
     st.markdown(_kpi_card("Stockout Wks",   f"{cum['stockout_wks']}/{week}", sc_clr), unsafe_allow_html=True)
-with k7:
+with k6:
     uf = cum['useful_pct']
     uc = "#1a8a4a" if uf > 80 else ("#d4850a" if uf > 50 else "#c0392b")
     st.markdown(_kpi_card("Useful Prod.",   f"{uf:.0f}%", uc), unsafe_allow_html=True)
@@ -2277,7 +2327,7 @@ st.markdown("")
 _max_stage = max(params['mat_lt'], params['semi_lt'], params['fp_lt'], params['dist_lt'])
 _rows_needed = math.ceil(_max_stage / MAX_PER_ROW)
 _stage_h  = _rows_needed * 145
-_stores_h = 2 * 118 + 10 + 28   # 2 store cards + gap + header; sized so LOST badge doesn't clip
+_stores_h = 118 + 28            # 1 aggregated store card + header; sized so LOST badge doesn't clip
 _content_h = max(_stage_h, _stores_h)
 _viz_h = 48 + 16 + _content_h + 28 + 32   # info bar + pad + content + phys flow + comment
 
@@ -2308,6 +2358,80 @@ if _pf is not None:
 st.components.v1.html(make_sc_html(state, params), height=_viz_h, scrolling=False)
 
 
+# --- Per-store zoom expander (always available, collapsed by default) ---
+with st.expander(f"🔍 Per-store zoom — W{state['week']} ({n_stores} stores)", expanded=False):
+    stores_arr = state.get('stores', [])
+    per_dem    = state.get('per_store_dem', [])
+    per_sales  = state.get('per_store_sales', [])
+    per_missed = state.get('per_store_missed', [])
+    allocs_arr = state.get('allocs', [])
+    dist_pipes_arr = state.get('dist_pipes', [])
+    dist_per_store = [sum(dp) for dp in dist_pipes_arr] if dist_pipes_arr else [0] * n_stores
+
+    if not stores_arr:
+        st.info("No per-store data for this week.")
+    else:
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Min stock",  f"{min(stores_arr):.0f}")
+        m2.metric("Avg stock",  f"{sum(stores_arr)/len(stores_arr):.1f}")
+        m3.metric("Max stock",  f"{max(stores_arr):.0f}")
+        m4.metric("Std",        f"{float(np.std(stores_arr)):.2f}")
+        m5.metric("Stockout stores (this wk)", f"{state.get('stores_w_stockout', 0)} / {n_stores}")
+
+        # Build per-store frame and show 3 histograms + 1 small table
+        per_df = pd.DataFrame({
+            'store': list(range(1, len(stores_arr) + 1)),
+            'stock_end_wk':  stores_arr,
+            'demand_wk':     per_dem,
+            'sales_wk':      per_sales,
+            'missed_wk':     per_missed,
+            'alloc_in_wk':   allocs_arr if len(allocs_arr) == len(stores_arr) else [0] * len(stores_arr),
+            'dist_pipe':     dist_per_store,
+        })
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.caption("End-of-week stock")
+            ch = (alt.Chart(per_df).mark_bar()
+                  .encode(x=alt.X("stock_end_wk:Q", bin=alt.Bin(maxbins=20), title="Units"),
+                          y=alt.Y("count():Q", title="Stores"))
+                  .properties(height=180))
+            st.altair_chart(ch, use_container_width=True)
+        with c2:
+            st.caption("Sales this week")
+            ch = (alt.Chart(per_df).mark_bar(color="#1a8a4a")
+                  .encode(x=alt.X("sales_wk:Q", bin=alt.Bin(maxbins=20), title="Units"),
+                          y=alt.Y("count():Q", title="Stores"))
+                  .properties(height=180))
+            st.altair_chart(ch, use_container_width=True)
+        with c3:
+            st.caption("Missed this week")
+            ch = (alt.Chart(per_df).mark_bar(color="#c0392b")
+                  .encode(x=alt.X("missed_wk:Q", bin=alt.Bin(maxbins=20), title="Units"),
+                          y=alt.Y("count():Q", title="Stores"))
+                  .properties(height=180))
+            st.altair_chart(ch, use_container_width=True)
+
+        if n_stores <= 20:
+            st.caption("Per-store table")
+            st.dataframe(per_df, use_container_width=True,
+                         hide_index=True, height=min(420, 40 + len(per_df) * 32))
+        else:
+            st.caption(f"Per-store table suppressed for N > 20 (showing extremes only). "
+                       f"Top 5 by stockout and bottom 5 by stock:")
+            top_miss = per_df.sort_values("missed_wk", ascending=False).head(5)
+            low_stk  = per_df.sort_values("stock_end_wk").head(5)
+            cc1, cc2 = st.columns(2)
+            with cc1:
+                st.markdown("**Most stockouts this week**")
+                st.dataframe(top_miss, use_container_width=True, hide_index=True,
+                             height=240)
+            with cc2:
+                st.markdown("**Lowest stock end of week**")
+                st.dataframe(low_stk, use_container_width=True, hide_index=True,
+                             height=240)
+
+
 # --- Show-calculations expander (when toggle is ON) ---
 if st.session_state.get("show_calcs", False):
     with st.expander(f"🧪 Calculations for week {state['week']} — show your work", expanded=True):
@@ -2328,30 +2452,27 @@ if st.session_state.get("show_calcs", False):
                 "simulation."
             )
         else:
-            # 1. DEMAND & SALES
+            # 1. DEMAND & SALES (aggregate; per-store breakdown is in the zoom expander)
             st.markdown("#### 1. Demand and store sales")
-            arr_a = s['dist_arr_a']; arr_b = s['dist_arr_b']
-            store_a_start = (prev['store_a'] if prev else 0)
-            store_b_start = (prev['store_b'] if prev else 0)
-            avail_a = store_a_start + arr_a
-            avail_b = store_b_start + arr_b
-            a_state = "fully met" if s['missed_a'] < 0.5 else "partially met"
-            b_state = "fully met" if s['missed_b'] < 0.5 else "partially met"
+            arr_total = s['dist_arr']
+            store_start_total = (prev['store_stock'] if prev else 0)
+            avail_total = store_start_total + arr_total
+            overall_state = "fully met" if s['missed'] < 0.5 else "partially met"
+            stockout_n = s.get('stores_w_stockout', 0)
             st.markdown(
-                f"This week's total customer demand is **{s['demand']:.0f} units**. "
-                f"With Store A taking {store_a_pct}% of demand and Store B the remaining "
-                f"{100 - store_a_pct}%, that breaks down to **{s['demand_a']:.0f} units "
-                f"for A** and **{s['demand_b']:.0f} units for B**.\n\n"
-                f"**Store A** started the week with {store_a_start:.0f} units. "
-                f"{arr_a:.0f} units arrived from the Distribution pipe this morning, so "
-                f"A had **{avail_a:.0f} available** to sell. Demand was therefore "
-                f"{a_state}: **{s['sales_a']:.0f} sold**, "
-                f"**{s['missed_a']:.0f} missed**, ending the week at "
-                f"**{s['store_a']:.0f} units**.\n\n"
-                f"**Store B** started with {store_b_start:.0f}, received {arr_b:.0f}, "
-                f"so had **{avail_b:.0f} available**. Demand was {b_state}: "
-                f"**{s['sales_b']:.0f} sold**, **{s['missed_b']:.0f} missed**, ending at "
-                f"**{s['store_b']:.0f}**."
+                f"This week's total customer demand is **{s['demand']:.0f} units**, "
+                f"drawn stochastically (multinomial) across **{n_stores} stores** "
+                f"(mean λ = {s['demand']/n_stores:.2f} per store, seed locks the realisation).\n\n"
+                f"The stores collectively started the week with **{store_start_total:.0f} units**. "
+                f"**{arr_total:.0f} units arrived** from the Distribution pipe this morning, "
+                f"so the network had **{avail_total:.0f} units available** to sell against "
+                f"the {s['demand']:.0f} units of demand.\n\n"
+                f"Demand was {overall_state}: **{s['sales']:.0f} sold**, "
+                f"**{s['missed']:.0f} missed**, ending the week at "
+                f"**{s['store_stock']:.0f} units** across the network "
+                f"(min {s.get('stores_min', 0):.0f}, max {s.get('stores_max', 0):.0f}, "
+                f"avg {s.get('stores_mean', 0):.1f}, std {s.get('stores_std', 0):.1f}). "
+                f"**{stockout_n}** of {n_stores} stores stocked out this week."
             )
 
             # 2. ARRIVALS → BUFFERS
@@ -2494,7 +2615,7 @@ if st.session_state.get("show_calcs", False):
                 # backlog values (= end of last week's), which is what the
                 # planner sees when reviewing at step 4 — BEFORE this week's
                 # new order is added to pb / the per-stage backlogs.
-                stores_now = s['store_a'] + s['store_b']
+                stores_now = s['store_stock']
                 # mat_pipe etc. as the planner sees them at step 4: position 0
                 # has been cleared at step 1 and its content folded into raw_mat
                 # at step 3; positions 1..end are unchanged from end of last week.
@@ -2555,51 +2676,34 @@ if st.session_state.get("show_calcs", False):
                 )
 
                 # --- Per-store gap explanation (only when smart distribution is on) ---
-                if smart_distrib and store_a_pct > 0 and store_a_pct < 100:
-                    pa = store_a_pct / 100.0
-                    pb_share = 1.0 - pa
+                if smart_distrib and n_stores > 1:
                     st.markdown(
                         "**Why the 'Per-store gap' column?** The pooled targets above "
-                        "pool the two stores' demand and the system's stock together. "
-                        "But when Store A and Store B have different demand shares "
-                        f"({store_a_pct}% / {100-store_a_pct}%), the pooled view can "
-                        "miss a case where ONE store would starve even though the "
-                        "aggregate looks fine. The per-store check asks, for each "
-                        "stage independently:\n\n"
+                        "treat the whole network as one big bucket. But with stochastic "
+                        f"per-store demand drawn from {n_stores} stores, individual stores "
+                        "can starve even when the aggregate looks fine. The per-store check "
+                        "asks, for each stage independently:\n\n"
                         "> *Will each store individually have enough, assuming smart "
-                        "distribution splits the common upstream pool by demand share?*"
+                        "distribution water-fills the common upstream pool to equalise "
+                        "weeks-of-cover?*"
                     )
                     st.markdown(
-                        f"The 'cleverness' is that the planner doesn't assume a "
-                        f"naïve `pct × pool` split of the common pool — it assumes "
-                        f"the SAME cover-equalising allocation that the CW push "
-                        f"executor will actually use later. Concretely, for each "
-                        f"stage:\n\n"
+                        f"The planner's expected allocation is the SAME cover-equalising "
+                        f"water-fill the CW will run later. For each stage:\n\n"
                         f"```\n"
-                        f"A_owned = store_a + Σ dist_pipe_a    (A-specific, can't be reassigned)\n"
-                        f"B_owned = store_b + Σ dist_pipe_b\n"
-                        f"total   = A_owned + B_owned + common_pool\n\n"
-                        f"# Smart's ideal: cover_a = cover_b after distribution\n"
-                        f"# ⇒ each store ends up with its demand-share of total:\n"
-                        f"share_a = clip(0, common_pool, pct_a × total − A_owned)\n"
-                        f"A_supply = A_owned + share_a\n"
-                        f"B_supply = total − A_supply\n\n"
-                        f"A_demand = pct_a × demand_over_cov_x        (= {pa:.2f} × lookahead)\n"
-                        f"B_demand = pct_b × demand_over_cov_x        (= {pb_share:.2f} × lookahead)\n\n"
-                        f"A_gap = max(0, A_demand − A_supply)\n"
-                        f"B_gap = max(0, B_demand − B_supply)\n"
-                        f"Per-store gap = (A_gap + B_gap) − this stage's own backlog\n"
+                        f"own[i]   = stores[i] + Σ dist_pipes[i]    (i = 1..N, store-specific)\n"
+                        f"total    = Σ own[i] + common_pool\n"
+                        f"target   = total / N                      (equal cover for everyone)\n\n"
+                        f"# Smart water-fills toward `target` from common_pool:\n"
+                        f"raw_share[i] = max(0, target − own[i])\n"
+                        f"if Σ raw_share > common_pool: scale raw_share by common_pool / Σ raw_share\n"
+                        f"supply[i]    = own[i] + raw_share[i]\n\n"
+                        f"demand_per_store = lookahead_total / N\n"
+                        f"gap[i]   = max(0, demand_per_store − supply[i])\n"
+                        f"Per-store gap = Σ gap[i] − this stage's own backlog\n"
                         f"```\n\n"
-                        f"The clip on `share_a` matters in two ways:\n"
-                        f"- If A is already over-covered (large `A_owned`), "
-                        f"`pct_a × total − A_owned` may be negative → smart keeps the "
-                        f"pool for B, share_a clamps to 0.\n"
-                        f"- If B is very over-covered (so `pct_a × total − A_owned` "
-                        f"exceeds the pool size), share_a is capped at `common_pool` "
-                        f"— smart can't physically move B's already-at-store stock "
-                        f"to A, only allocate units in the common pool.\n\n"
-                        f"The `common_pool` for each stage:\n"
-                        f"- **Ship**:     0   (we're computing the pool itself)\n"
+                        f"`common_pool` per stage:\n"
+                        f"- **Ship**:     0  (we're computing the pool itself)\n"
                         f"- **FP**:       fp_pipe + cw\n"
                         f"- **Semi-Fin**: semi_pipe + semi + fp_pipe + cw\n"
                         f"- **Supplier**: mat_pipe + raw_mat + semi_pipe + semi + "
@@ -2607,7 +2711,7 @@ if st.session_state.get("show_calcs", False):
                         f"Final order = `max(pooled-gap, per-store-gap)`."
                     )
 
-                    # Worked example for the Supplier (most reach, most opaque)
+                    # Worked example — Supplier stage (most reach)
                     cd_sup = calc['sup']
                     if seasonal_mode and pf is not None:
                         demand_X = sum(pc[i] if (0 < i < len(pc)) else 0.0
@@ -2621,50 +2725,54 @@ if st.session_state.get("show_calcs", False):
                                       + sum(s.get('fp_pipe', []))
                                       + s.get('cw_stock', 0)
                                       + pb_pre)
-                    a0_sup = s['store_a'] + sum(s.get('dist_pipe_a', []))
-                    b0_sup = s['store_b'] + sum(s.get('dist_pipe_b', []))
-                    total_sup = a0_sup + b0_sup + common_pool_sup
-                    ideal_share_a = pa * total_sup - a0_sup
-                    share_a = max(0, min(common_pool_sup, ideal_share_a))
-                    a_supply = a0_sup + share_a
-                    b_supply = total_sup - a_supply
-                    a_demand = pa * demand_X
-                    b_demand = pb_share * demand_X
-                    a_gap = max(0, a_demand - a_supply)
-                    b_gap = max(0, b_demand - b_supply)
-                    share_note = ""
-                    if ideal_share_a < 0:
-                        share_note = f" (clamped to 0 — A already over-covered)"
-                    elif ideal_share_a > common_pool_sup:
-                        share_note = f" (clamped to pool — A still short, B's at-store stock can't be moved)"
+                    stores_arr = np.array(s.get('stores', []), dtype=float)
+                    dist_per_store = np.array([sum(dp) for dp in s.get('dist_pipes', [])], dtype=float)
+                    own_arr = stores_arr + dist_per_store
+                    total_sup = float(own_arr.sum()) + common_pool_sup
+                    target = total_sup / n_stores if n_stores else 0.0
+                    raw_share = np.maximum(0.0, target - own_arr)
+                    s_sum = float(raw_share.sum())
+                    scaled_note = ""
+                    if s_sum > common_pool_sup + 1e-9 and s_sum > 0:
+                        raw_share = raw_share * (common_pool_sup / s_sum)
+                        scaled_note = " (scaled to fit pool)"
+                    supply = own_arr + raw_share
+                    dem_per = demand_X / n_stores if n_stores else 0.0
+                    gaps = np.maximum(0.0, dem_per - supply)
+                    total_gap = float(gaps.sum())
+                    under_covered = int((gaps > 0.5).sum())
                     st.markdown(
-                        f"**Concrete example — Supplier per-store gap at W{s['week']}** "
-                        f"(smart-aware allocation, not naïve pct split):"
+                        f"**Concrete example — Supplier per-store gap at W{s['week']}**:"
                     )
-                    ps_rows = [
-                        {'Quantity':   'demand_over_cov_sup (next ' + str(cov_sup_local) + ' wks)',
-                         'A':          f"{a_demand:.0f}  (= {pa:.2f} × {demand_X:.0f})",
-                         'B':          f"{b_demand:.0f}  (= {pb_share:.2f} × {demand_X:.0f})"},
-                        {'Quantity':   'A/B own dedicated stock (store + dist pipe)',
-                         'A':          f"{a0_sup:.0f}",
-                         'B':          f"{b0_sup:.0f}"},
-                        {'Quantity':   f"Smart-equalising share of common pool ({common_pool_sup:.0f})",
-                         'A':          f"{share_a:.0f}  (ideal: {ideal_share_a:.0f}{share_note})",
-                         'B':          f"{common_pool_sup - share_a:.0f}"},
-                        {'Quantity':   '⇒ Total supply',
-                         'A':          f"**{a_supply:.0f}**",
-                         'B':          f"**{b_supply:.0f}**"},
-                        {'Quantity':   '⇒ Gap (= max(0, demand − supply))',
-                         'A':          f"**{a_gap:.0f}**",
-                         'B':          f"**{b_gap:.0f}**"},
+                    rows_ps = [
+                        {'Quantity': 'Lookahead total demand (next ' + str(cov_sup_local) + ' wks)',
+                         'Aggregate': f"{demand_X:.0f}",
+                         'Per store (÷ N)': f"{dem_per:.2f}"},
+                        {'Quantity': 'Own dedicated stock (stores + dist pipes)',
+                         'Aggregate': f"{float(own_arr.sum()):.0f}",
+                         'Per store (avg/min/max)':
+                             f"{float(own_arr.mean()):.2f} / "
+                             f"{float(own_arr.min()):.0f} / "
+                             f"{float(own_arr.max()):.0f}"},
+                        {'Quantity': f"Common pool to allocate",
+                         'Aggregate': f"{common_pool_sup:.0f}",
+                         'Notes': scaled_note or "fits without scaling"},
+                        {'Quantity': '⇒ Water-fill target per store (= total / N)',
+                         'Aggregate': f"{target:.2f}",
+                         'Notes': ""},
+                        {'Quantity': '⇒ Stores under-covered after water-fill',
+                         'Aggregate': f"{under_covered} / {n_stores}",
+                         'Notes': ""},
+                        {'Quantity': '⇒ Sum of per-store gaps (Σ max(0, demand/store − supply[i]))',
+                         'Aggregate': f"**{total_gap:.0f}**",
+                         'Notes': ""},
                     ]
-                    st.table(pd.DataFrame(ps_rows).set_index('Quantity'))
+                    st.table(pd.DataFrame(rows_ps).set_index('Quantity'))
                     st.markdown(
-                        f"Sum of per-store gaps = {a_gap:.0f} + {b_gap:.0f} = "
-                        f"**{a_gap + b_gap:.0f}**. After subtracting the supplier's "
-                        f"already-pending backlog ({pb_pre:.0f}), the Per-store gap "
-                        f"contribution shown for Supplier in the table above is "
-                        f"**{max(0, a_gap + b_gap - pb_pre):.0f}**."
+                        f"After subtracting the supplier's already-pending backlog "
+                        f"({pb_pre:.0f}), the Per-store gap contribution shown for "
+                        f"Supplier in the table above is "
+                        f"**{max(0, total_gap - pb_pre):.0f}**."
                     )
             else:
                 next_review = ((s['week'] // order_freq) + 1) * order_freq
@@ -2733,9 +2841,11 @@ if st.session_state.get("show_calcs", False):
                     f"uncapped, so the warehouse pushes **min(CW, ship_backlog) = "
                     f"{ship_out:.0f}** units toward the stores. Smart distribution "
                     f"allocates them by demand share and per-store cover, prioritising "
-                    f"whichever store would otherwise starve first — this week "
-                    f"**{s['alloc_a']:.0f} go to A** and **{s['alloc_b']:.0f} go to B**. "
-                    f"They enter the Distribution pipe and will arrive at the stores "
+                    f"whichever stores would otherwise starve first — this week "
+                    f"**{sum(s.get('allocs', [])):.0f} total units** are split across "
+                    f"the {n_stores} stores (min/max per store: "
+                    f"{min(s.get('allocs', [0])):.0f} / {max(s.get('allocs', [0])):.0f}). "
+                    f"They enter the Distribution pipes and will arrive at the stores "
                     f"in {dist_lt} week(s)."
                 )
             else:
@@ -2754,8 +2864,8 @@ if st.session_state.get("show_calcs", False):
                 f"slot receives this week's freshly-pushed units. So the Material pipe "
                 f"now gains the **{s['supplier_shipped']:.0f}** units the supplier just "
                 f"shipped, the Semi pipe gains **{si:.0f}**, the FP pipe gains "
-                f"**{fi:.0f}**, and the Distribution pipes gain **{s['alloc_a']:.0f}** "
-                f"(to A) and **{s['alloc_b']:.0f}** (to B)."
+                f"**{fi:.0f}**, and the **{n_stores}** Distribution pipes collectively "
+                f"gain **{sum(s.get('allocs', [])):.0f}** units (water-filled across stores)."
             )
             st.markdown(
                 f"**Costs are booked the moment units enter each stage** (no anticipation, "
@@ -2803,40 +2913,32 @@ with st.expander("\U0001f4c8 Charts: Demand, Fulfillment, Stocks", expanded=Fals
 
     ch1, ch2 = st.columns(2)
     with ch1:
-        st.markdown("#### Demand vs Fulfillment (per store)")
+        st.markdown("#### Demand vs Fulfillment (aggregate)")
         rows = []
         for s in states[1:]:
-            rows.append({'Week': s['week'], 'Group': 'Fill A', 'Component': 'Sales A', 'Value': s['sales_a']})
-            rows.append({'Week': s['week'], 'Group': 'Fill A', 'Component': 'Lost A',  'Value': s['missed_a']})
-            rows.append({'Week': s['week'], 'Group': 'Fill B', 'Component': 'Sales B', 'Value': s['sales_b']})
-            rows.append({'Week': s['week'], 'Group': 'Fill B', 'Component': 'Lost B',  'Value': s['missed_b']})
+            rows.append({'Week': s['week'], 'Component': 'Sales',  'Value': s['sales']})
+            rows.append({'Week': s['week'], 'Component': 'Missed', 'Value': s['missed']})
         df_bars = pd.DataFrame(rows)
         bars = alt.Chart(df_bars).mark_bar(cornerRadiusTopLeft=2, cornerRadiusTopRight=2).encode(
             x=alt.X('Week:O'), y=alt.Y('Value:Q', title='Units', stack=True),
             color=alt.Color('Component:N',
-                scale=alt.Scale(domain=['Sales A', 'Lost A', 'Sales B', 'Lost B'],
-                                range=['#2c5f8a', '#c0392b', '#6a3d9a', '#e74c8c']),
-                legend=alt.Legend(orient='top', title=None, columns=2)),
-            xOffset='Group:N',
+                scale=alt.Scale(domain=['Sales', 'Missed'], range=['#1a8a4a', '#c0392b']),
+                legend=alt.Legend(orient='top', title=None)),
         ).properties(height=260)
         rule = alt.Chart(pd.DataFrame({'Week': [week]})).mark_rule(
             color='#d4850a', strokeWidth=2, strokeDash=[4, 2]).encode(x='Week:O')
         st.altair_chart(bars + rule, use_container_width=True)
 
     with ch2:
-        st.markdown("#### Store Stocks & Orders")
+        st.markdown("#### Store Stocks (aggregate) & Orders")
         stock_data = pd.DataFrame({
-            'Week': [s['week'] for s in states],
-            'Store A': [s['store_a'] for s in states],
-            'Store B': [s['store_b'] for s in states],
-            'Order':   [s['order']   for s in states],
+            'Week':         [s['week'] for s in states],
+            'Stores total': [s['store_stock'] for s in states],
+            'Order':        [s['order']       for s in states],
         })
-        melted = stock_data.melt('Week', ['Store A', 'Store B'], var_name='Store', value_name='Stock')
-        lines = alt.Chart(melted).mark_area(opacity=0.25).encode(
-            x=alt.X('Week:O'), y=alt.Y('Stock:Q', title='Units', stack=False),
-            color=alt.Color('Store:N',
-                scale=alt.Scale(domain=['Store A', 'Store B'], range=['#2c5f8a', '#6a3d9a']),
-                legend=alt.Legend(orient='top', title=None)),
+        lines = alt.Chart(stock_data).mark_area(opacity=0.30, color='#2c5f8a').encode(
+            x=alt.X('Week:O'),
+            y=alt.Y('Stores total:Q', title='Units (sum across stores)'),
         ).properties(height=260)
         order_bars = alt.Chart(stock_data[stock_data['Order'] > 0]).mark_bar(
             color='#1a8a4a', opacity=0.4, cornerRadiusTopLeft=2, cornerRadiusTopRight=2
@@ -2949,19 +3051,23 @@ with st.expander("\U0001f4ca Detailed Week-by-Week Data", expanded=False):
             'Cover Tgt':   s.get('target_sup', 0),
             'Planner f':   round(pf, 2) if pf is not None else None,
 
-            # Demand / Sales / Misses
-            'Demand':      s['demand'],   'Dem A':   s['demand_a'],   'Dem B':   s['demand_b'],
-            'Sales':       s['sales'],    'Sales A': s['sales_a'],    'Sales B': s['sales_b'],
-            'Missed':      s['missed'],   'Miss A':  s['missed_a'],   'Miss B':  s['missed_b'],
+            # Demand / Sales / Misses (aggregate; per-store detail in zoom)
+            'Demand':      s['demand'],
+            'Sales':       s['sales'],
+            'Missed':      s['missed'],
+            'Stockout Stores': s.get('stores_w_stockout', 0),
 
-            # Stores
-            'Store A':     s['store_a'],  'Store B': s['store_b'],
-            'Alloc A':     s['alloc_a'],  'Alloc B': s['alloc_b'],
+            # Stores (aggregate + spread)
+            'Stores Total': s.get('store_stock', 0),
+            'Stores Avg':   s.get('stores_mean', 0),
+            'Stores Min':   s.get('stores_min', 0),
+            'Stores Max':   s.get('stores_max', 0),
+            'Alloc Total':  sum(s.get('allocs', [])),
 
             # CW → Store stage
             'Finishing Buffer': s.get('cw_stock', 0),
             'Distribution Push': s.get('cw_shipped', 0),
-            'Distribution pipe': round(sum(s.get('dist_pipe_a', [])) + sum(s.get('dist_pipe_b', [])), 1),
+            'Distribution pipe': round(sum(sum(dp) for dp in s.get('dist_pipes', [])), 1),
             'Distribution BL':   s.get('ship_backlog', 0),
             'Ord Distribution':  s.get('order_ship', 0),
 
