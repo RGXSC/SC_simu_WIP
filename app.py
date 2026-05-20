@@ -109,7 +109,7 @@ _DEFAULTS = {
     "order_freq": 1,
     "total_stock": 1500,
     "store_pct": 40, "wh_pct": 20, "semi_pct": 10,
-    "n_stores": 2, "rng_seed": 42, "smart_distrib": True,
+    "n_stores": 50, "smart_distrib": True,
     "demand_shape": DEMAND_SHAPES[0],
     "app_mode": "Single Scenario",
     # "kickstart": False,  # removed in v3
@@ -268,6 +268,54 @@ def _smart_alloc_n(ship_out, stores_arr, dist_pipes, forecast_per_store):
     return int_allocs
 
 
+# Tier mix: 50% slow / 30% medium / 20% high with weights 0.4 / 1.0 / 3.0.
+# Mean weight = 0.5·0.4 + 0.3·1.0 + 0.2·3.0 = 1.1 (so per-store rate is
+# roughly aggregate/N × tier_weight/1.1).
+TIER_WEIGHTS = {"slow": 0.4, "medium": 1.0, "high": 3.0}
+TIER_SHARE   = {"slow": 0.50, "medium": 0.30, "high": 0.20}
+
+def _store_tier_probs(n_stores, rng_seed):
+    """
+    Persistent per-store demand share.
+
+    Slow stores rarely sell (most weeks 0, occasionally 1), medium sell
+    ~1/wk, high sell several per week. The same store keeps its tier all
+    simulation long — assignment is a deterministic shuffle seeded by
+    rng_seed, so re-running with the same N yields the same tier map.
+
+    Returns
+    -------
+    probs   : np.array length N, sum = 1 (feed to rng.multinomial)
+    weights : np.array length N, raw tier weights (mean ≈ 1.1)
+    tiers   : list[str] length N, "slow" / "medium" / "high"
+    """
+    n = int(max(1, n_stores))
+    n_high   = max(1, int(round(n * TIER_SHARE["high"])))
+    n_medium = max(1, int(round(n * TIER_SHARE["medium"])))
+    n_slow   = n - n_high - n_medium
+    if n_slow < 0:                                  # very small N: clamp
+        n_slow = 0
+        n_medium = max(0, n - n_high)
+    weights = np.concatenate([
+        np.full(n_slow,   TIER_WEIGHTS["slow"]),
+        np.full(n_medium, TIER_WEIGHTS["medium"]),
+        np.full(n_high,   TIER_WEIGHTS["high"]),
+    ])
+    # Separate RNG stream from demand so changing N doesn't reshuffle demand.
+    rng_tier = np.random.default_rng(int(rng_seed) + 99991)
+    order = rng_tier.permutation(n)
+    weights = weights[order]
+    tiers = np.where(weights == TIER_WEIGHTS["high"], "high",
+             np.where(weights == TIER_WEIGHTS["medium"], "medium", "slow")).tolist()
+    probs = weights / weights.sum()
+    return probs, weights, tiers
+
+
+# Fixed seed for per-store demand draws (kept out of the UI so the simulator
+# is always reproducible — same inputs, same draws every time).
+FIXED_RNG_SEED = 42
+
+
 @st.cache_data
 def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
                    order_freq, mat_lt, semi_lt, fp_lt, dist_lt,
@@ -347,6 +395,10 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
     coverage = phys_lt + order_freq
     n_stores = int(max(1, n_stores))
     rng = np.random.default_rng(int(rng_seed))
+    # Tiered store mix (50% slow / 30% medium / 20% high). Same store keeps
+    # its tier all simulation; the multinomial below uses these probabilities
+    # so high stores systematically sell more than slow ones.
+    tier_probs, tier_weights, tier_labels = _store_tier_probs(n_stores, int(rng_seed))
 
     # Per-stage downstream coverages (how many weeks of demand each stage
     # must keep covered DOWNSTREAM of its own push point, including freq).
@@ -443,6 +495,8 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
         'per_store_dem': [0] * n_stores,
         'per_store_sales': [0] * n_stores,
         'per_store_missed': [0] * n_stores,
+        'tier_labels': list(tier_labels),
+        'tier_weights': [float(x) for x in tier_weights],
         'supplier_shipped': 0, 'supplier_cap': cap_start,
         'raw_mat_before_prod': raw_mat, 'raw_mat_stock': raw_mat,
         'semi_input': 0, 'semi_cap': cap_start, 'semi_stock': semi,
@@ -469,10 +523,11 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
     for w in range(1, weeks + 1):
         s = {'week': w}
         dem_total = demand[w]
-        # Multinomial split: aggregate stays exactly equal to dem_total, but
-        # each store sees a stochastic share with mean dem_total / n_stores.
+        # Tiered multinomial split: aggregate stays exactly equal to
+        # dem_total; high-tier stores systematically draw more, slow stores
+        # often draw 0 — same stores all simulation long.
         if dem_total > 0:
-            per_store_dem = rng.multinomial(int(dem_total), [1.0 / n_stores] * n_stores)
+            per_store_dem = rng.multinomial(int(dem_total), tier_probs)
         else:
             per_store_dem = np.zeros(n_stores, dtype=int)
 
@@ -631,14 +686,20 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
                         dx = _lookahead_sum(planner_curve_internal, w + 1, w + cov_x)
                     else:
                         dx = ff * cov_x
-                    total_avail = float(own.sum()) + float(common_pool)
-                    target = total_avail / n_stores
-                    raw_shares = np.maximum(0.0, target - own)
+                    # Tier-weighted water-fill: equalise weeks-of-cover, not
+                    # raw stock levels. Each store i targets
+                    #     own[i] + share[i] = target_cov × fcst[i]
+                    # with fcst[i] = ff × tier_probs[i]. Reduces to the
+                    # uniform formulation when all tiers are equal.
+                    fcst = np.maximum(ff * tier_probs, 1e-6)
+                    fcst_total = float(fcst.sum())
+                    target_cov = (float(own.sum()) + float(common_pool)) / max(fcst_total, 1e-6)
+                    raw_shares = np.maximum(0.0, target_cov * fcst - own)
                     s_sum = float(raw_shares.sum())
                     if s_sum > common_pool + 1e-9 and s_sum > 0:
                         raw_shares = raw_shares * (common_pool / s_sum)
                     supply = own + raw_shares
-                    dx_per = dx / n_stores
+                    dx_per = dx * tier_probs              # per-store horizon demand
                     gaps = np.maximum(0.0, dx_per - supply)
                     return float(gaps.sum())
 
@@ -756,7 +817,10 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
         s['ship_backlog'] = round(ship_backlog, 1)
 
         if ship_out > 0:
-            fcst_per_store = np.full(n_stores, max(ff / n_stores, 0.01))
+            # Smart allocator uses tier-weighted per-store forecast so high
+            # stores get their fair share. Push (else branch) keeps blind
+            # equal-split — that's the whole point of the comparison.
+            fcst_per_store = np.maximum(ff * tier_probs, 0.01)
             if smart_distrib and smart_discovered:
                 # Smart: water-fill to equalise weeks-of-cover across stores
                 allocs = _smart_alloc_n(ship_out, stores, dist_pipes, fcst_per_store)
@@ -1561,7 +1625,6 @@ BATCH_INPUT_COLS = [
     "Scenario\nLabel",
     "Sim\nWeeks",
     "N\nStores",
-    "Seed",
     "Material\nLT (wk)",
     "Semi\nLT (wk)",
     "Finishing\nLT (wk)",
@@ -1626,28 +1689,27 @@ def _batch_default_rows():
         rows.append({
             BATCH_INPUT_COLS[0]:  label,
             BATCH_INPUT_COLS[1]:  26,
-            BATCH_INPUT_COLS[2]:  2,         # N stores
-            BATCH_INPUT_COLS[3]:  42,        # Seed
-            BATCH_INPUT_COLS[4]:  lt["mat_lt"],
-            BATCH_INPUT_COLS[5]:  lt["semi_lt"],
-            BATCH_INPUT_COLS[6]:  lt["fp_lt"],
-            BATCH_INPUT_COLS[7]:  lt["dist_lt"],
-            BATCH_INPUT_COLS[8]:  lt["order_freq"],
-            BATCH_INPUT_COLS[9]:  stock,
-            BATCH_INPUT_COLS[10]: dist["store_pct"],
-            BATCH_INPUT_COLS[11]: dist["wh_pct"],
-            BATCH_INPUT_COLS[12]: dist["semi_pct"],
-            BATCH_INPUT_COLS[13]: True,
-            BATCH_INPUT_COLS[14]: "Linear",
-            BATCH_INPUT_COLS[15]: lin_end,
-            BATCH_INPUT_COLS[16]: lin_wks,
-            BATCH_INPUT_COLS[17]: "Steep",
+            BATCH_INPUT_COLS[2]:  50,        # N stores (default mid-range)
+            BATCH_INPUT_COLS[3]:  lt["mat_lt"],
+            BATCH_INPUT_COLS[4]:  lt["semi_lt"],
+            BATCH_INPUT_COLS[5]:  lt["fp_lt"],
+            BATCH_INPUT_COLS[6]:  lt["dist_lt"],
+            BATCH_INPUT_COLS[7]:  lt["order_freq"],
+            BATCH_INPUT_COLS[8]:  stock,
+            BATCH_INPUT_COLS[9]:  dist["store_pct"],
+            BATCH_INPUT_COLS[10]: dist["wh_pct"],
+            BATCH_INPUT_COLS[11]: dist["semi_pct"],
+            BATCH_INPUT_COLS[12]: True,
+            BATCH_INPUT_COLS[13]: "Linear",
+            BATCH_INPUT_COLS[14]: lin_end,
+            BATCH_INPUT_COLS[15]: lin_wks,
+            BATCH_INPUT_COLS[16]: "Steep",
+            BATCH_INPUT_COLS[17]: 100,
             BATCH_INPUT_COLS[18]: 100,
-            BATCH_INPUT_COLS[19]: 100,
-            BATCH_INPUT_COLS[20]: 20,
-            BATCH_INPUT_COLS[21]: 1000,
-            BATCH_INPUT_COLS[22]: 200,
-            BATCH_INPUT_COLS[23]: 45,
+            BATCH_INPUT_COLS[19]: 20,
+            BATCH_INPUT_COLS[20]: 1000,
+            BATCH_INPUT_COLS[21]: 200,
+            BATCH_INPUT_COLS[22]: 45,
         })
     return pd.DataFrame(rows)
 
@@ -1656,27 +1718,26 @@ def _run_one_scenario(row):
     """Run one scenario row through the engine and return a dict of outputs."""
     w           = int(row[BATCH_INPUT_COLS[1]])
     n_stores    = int(row[BATCH_INPUT_COLS[2]])
-    seed        = int(row[BATCH_INPUT_COLS[3]])
-    mat_lt      = int(row[BATCH_INPUT_COLS[4]])
-    semi_lt     = int(row[BATCH_INPUT_COLS[5]])
-    fp_lt       = int(row[BATCH_INPUT_COLS[6]])
-    dist_lt     = int(row[BATCH_INPUT_COLS[7]])
-    freq        = int(row[BATCH_INPUT_COLS[8]])
-    total_stock = int(row[BATCH_INPUT_COLS[9]])
-    sp          = int(row[BATCH_INPUT_COLS[10]])
-    wp          = int(row[BATCH_INPUT_COLS[11]])
-    sep         = int(row[BATCH_INPUT_COLS[12]])
-    smart       = bool(row[BATCH_INPUT_COLS[13]])
-    shape       = str(row[BATCH_INPUT_COLS[14]])
-    lin_end     = int(row[BATCH_INPUT_COLS[15]])
-    lin_wks     = int(row[BATCH_INPUT_COLS[16]])
-    seas_sub    = str(row[BATCH_INPUT_COLS[17]])
-    seas_avg    = int(row[BATCH_INPUT_COLS[18]])
-    cap_start   = int(row[BATCH_INPUT_COLS[19]])
-    cap_ramp    = float(row[BATCH_INPUT_COLS[20]]) / 100.0
-    price       = int(row[BATCH_INPUT_COLS[21]])
-    var_cost    = int(row[BATCH_INPUT_COLS[22]])
-    fixed_pct   = float(row[BATCH_INPUT_COLS[23]]) / 100.0
+    mat_lt      = int(row[BATCH_INPUT_COLS[3]])
+    semi_lt     = int(row[BATCH_INPUT_COLS[4]])
+    fp_lt       = int(row[BATCH_INPUT_COLS[5]])
+    dist_lt     = int(row[BATCH_INPUT_COLS[6]])
+    freq        = int(row[BATCH_INPUT_COLS[7]])
+    total_stock = int(row[BATCH_INPUT_COLS[8]])
+    sp          = int(row[BATCH_INPUT_COLS[9]])
+    wp          = int(row[BATCH_INPUT_COLS[10]])
+    sep         = int(row[BATCH_INPUT_COLS[11]])
+    smart       = bool(row[BATCH_INPUT_COLS[12]])
+    shape       = str(row[BATCH_INPUT_COLS[13]])
+    lin_end     = int(row[BATCH_INPUT_COLS[14]])
+    lin_wks     = int(row[BATCH_INPUT_COLS[15]])
+    seas_sub    = str(row[BATCH_INPUT_COLS[16]])
+    seas_avg    = int(row[BATCH_INPUT_COLS[17]])
+    cap_start   = int(row[BATCH_INPUT_COLS[18]])
+    cap_ramp    = float(row[BATCH_INPUT_COLS[19]]) / 100.0
+    price       = int(row[BATCH_INPUT_COLS[20]])
+    var_cost    = int(row[BATCH_INPUT_COLS[21]])
+    fixed_pct   = float(row[BATCH_INPUT_COLS[22]]) / 100.0
 
     init_store  = int(round(total_stock * sp / 100))
     init_cw     = int(round(total_stock * wp / 100))
@@ -1698,7 +1759,7 @@ def _run_one_scenario(row):
         fp_lt=fp_lt, dist_lt=dist_lt,
         cap_start=cap_start, cap_ramp=cap_ramp, base_forecast=BASE_FORECAST,
         price=price, var_cost=var_cost, fixed_pct=fixed_pct,
-        n_stores=n_stores, rng_seed=seed, smart_distrib=smart,
+        n_stores=n_stores, rng_seed=FIXED_RNG_SEED, smart_distrib=smart,
         debug=False,
         custom_demand=tuple([0] + cd),
         planner_curve=tuple(pc) if pc is not None else None,
@@ -2015,21 +2076,22 @@ with st.sidebar:
 
     # --- Store network ---
     st.markdown("### \U0001f3ea Store Network")
-    n_stores = st.select_slider("Number of stores",
-                                options=[2, 10, 50, 100, 200, 500],
-                                key="n_stores")
-    rng_seed = st.number_input("Random seed", min_value=0, max_value=10_000,
-                               step=1, key="rng_seed",
-                               help="Per-store demand is drawn from a Poisson-like split "
-                                    "(multinomial) of the aggregate. Same seed = same draws "
-                                    "every time — change to test a different random world.")
+    n_stores = st.slider("Number of stores",
+                         min_value=10, max_value=500, step=10,
+                         key="n_stores")
+    rng_seed = FIXED_RNG_SEED      # fixed — same draws every run
     smart_distrib = st.toggle("Smart Distribution (need-based)", key="smart_distrib")
+    st.caption(
+        f"**{n_stores} stores** — mix is 50% slow (rare sales), 30% medium "
+        f"(~1/wk), 20% high (several/wk). Same store keeps its tier all "
+        f"simulation, so the best sellers are always the best sellers."
+    )
     if smart_distrib:
-        st.caption(f"**{n_stores} stores**, equal initial split; CW water-fills each "
-                   f"week to equalise weeks-of-cover.")
+        st.caption("CW water-fills each week to equalise weeks-of-cover "
+                   "(tier-weighted — high stores get bigger shares).")
     else:
-        st.caption(f"**{n_stores} stores**, equal initial split; CW pushes equal "
-                   f"shares each week (blind to per-store stock).")
+        st.caption("CW pushes equal shares each week (blind to tier — "
+                   "high stores starve, slow stores overstock).")
 
     # --- Demand profile ---
     st.markdown("### \U0001f4c8 Demand Profile")
@@ -2217,7 +2279,7 @@ params = {
     'cap_start': cap_start, 'cap_ramp': cap_ramp,
     'base_forecast': BASE_FORECAST,
     'price': price, 'var_cost': var_cost, 'fixed_pct': fixed_pct,
-    'n_stores': n_stores, 'rng_seed': rng_seed, 'smart_distrib': smart_distrib,
+    'n_stores': n_stores, 'rng_seed': FIXED_RNG_SEED, 'smart_distrib': smart_distrib,
     'debug': debug_mode,
     'custom_demand':  tuple(custom_demand),
     'planner_curve':  tuple(planner_curve) if planner_curve is not None else None,
@@ -2367,10 +2429,20 @@ with st.expander(f"🔍 Per-store zoom — W{state['week']} ({n_stores} stores)"
     allocs_arr = state.get('allocs', [])
     dist_pipes_arr = state.get('dist_pipes', [])
     dist_per_store = [sum(dp) for dp in dist_pipes_arr] if dist_pipes_arr else [0] * n_stores
+    # Tier labels are stored once in W0 — same for every week.
+    tier_labels = states[0].get('tier_labels', ['medium'] * len(stores_arr))
 
     if not stores_arr:
         st.info("No per-store data for this week.")
     else:
+        n_slow   = tier_labels.count('slow')
+        n_medium = tier_labels.count('medium')
+        n_high   = tier_labels.count('high')
+        t1, t2, t3 = st.columns(3)
+        t1.metric(f"Slow stores ({TIER_WEIGHTS['slow']:.1f}× rate)",   n_slow)
+        t2.metric(f"Medium stores ({TIER_WEIGHTS['medium']:.1f}× rate)", n_medium)
+        t3.metric(f"High stores ({TIER_WEIGHTS['high']:.1f}× rate)",   n_high)
+
         m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("Min stock",  f"{min(stores_arr):.0f}")
         m2.metric("Avg stock",  f"{sum(stores_arr)/len(stores_arr):.1f}")
@@ -2381,6 +2453,7 @@ with st.expander(f"🔍 Per-store zoom — W{state['week']} ({n_stores} stores)"
         # Build per-store frame and show 3 histograms + 1 small table
         per_df = pd.DataFrame({
             'store': list(range(1, len(stores_arr) + 1)),
+            'tier':          tier_labels,
             'stock_end_wk':  stores_arr,
             'demand_wk':     per_dem,
             'sales_wk':      per_sales,
@@ -2459,10 +2532,16 @@ if st.session_state.get("show_calcs", False):
             avail_total = store_start_total + arr_total
             overall_state = "fully met" if s['missed'] < 0.5 else "partially met"
             stockout_n = s.get('stores_w_stockout', 0)
+            n_high_lbl   = states[0].get('tier_labels', []).count('high')
+            n_medium_lbl = states[0].get('tier_labels', []).count('medium')
+            n_slow_lbl   = states[0].get('tier_labels', []).count('slow')
             st.markdown(
                 f"This week's total customer demand is **{s['demand']:.0f} units**, "
                 f"drawn stochastically (multinomial) across **{n_stores} stores** "
-                f"(mean λ = {s['demand']/n_stores:.2f} per store, seed locks the realisation).\n\n"
+                f"split into **{n_slow_lbl} slow** ({TIER_WEIGHTS['slow']:.1f}× rate), "
+                f"**{n_medium_lbl} medium** ({TIER_WEIGHTS['medium']:.1f}× rate), "
+                f"**{n_high_lbl} high** ({TIER_WEIGHTS['high']:.1f}× rate). "
+                f"Same store keeps its tier every week.\n\n"
                 f"The stores collectively started the week with **{store_start_total:.0f} units**. "
                 f"**{arr_total:.0f} units arrived** from the Distribution pipe this morning, "
                 f"so the network had **{avail_total:.0f} units available** to sell against "
@@ -2689,17 +2768,20 @@ if st.session_state.get("show_calcs", False):
                     )
                     st.markdown(
                         f"The planner's expected allocation is the SAME cover-equalising "
-                        f"water-fill the CW will run later. For each stage:\n\n"
+                        f"water-fill the CW will run later. **Tier-weighted**: stores aren't "
+                        f"equal — each store has a probability `prob[i] ∝ tier_weight[i]` "
+                        f"(0.4/1.0/3.0). For each stage:\n\n"
                         f"```\n"
                         f"own[i]   = stores[i] + Σ dist_pipes[i]    (i = 1..N, store-specific)\n"
+                        f"fcst[i]  = ff × prob[i]                   (high tier → higher fcst)\n"
                         f"total    = Σ own[i] + common_pool\n"
-                        f"target   = total / N                      (equal cover for everyone)\n\n"
-                        f"# Smart water-fills toward `target` from common_pool:\n"
-                        f"raw_share[i] = max(0, target − own[i])\n"
+                        f"target_cov = total / Σ fcst               (equal weeks-of-cover)\n\n"
+                        f"# Smart water-fills toward `target_cov × fcst[i]` from common_pool:\n"
+                        f"raw_share[i] = max(0, target_cov × fcst[i] − own[i])\n"
                         f"if Σ raw_share > common_pool: scale raw_share by common_pool / Σ raw_share\n"
                         f"supply[i]    = own[i] + raw_share[i]\n\n"
-                        f"demand_per_store = lookahead_total / N\n"
-                        f"gap[i]   = max(0, demand_per_store − supply[i])\n"
+                        f"demand_per_store[i] = lookahead_total × prob[i]\n"
+                        f"gap[i]   = max(0, demand_per_store[i] − supply[i])\n"
                         f"Per-store gap = Σ gap[i] − this stage's own backlog\n"
                         f"```\n\n"
                         f"`common_pool` per stage:\n"
@@ -2728,26 +2810,31 @@ if st.session_state.get("show_calcs", False):
                     stores_arr = np.array(s.get('stores', []), dtype=float)
                     dist_per_store = np.array([sum(dp) for dp in s.get('dist_pipes', [])], dtype=float)
                     own_arr = stores_arr + dist_per_store
+                    # Tier-weighted water-fill (matches engine's _ps_gap)
+                    tw = np.array(states[0].get('tier_weights', [1.0] * n_stores), dtype=float)
+                    tw_probs = tw / tw.sum() if tw.sum() > 0 else np.full(n_stores, 1.0/n_stores)
+                    fcst_ps = np.maximum(s['forecast'] * tw_probs, 1e-6)
                     total_sup = float(own_arr.sum()) + common_pool_sup
-                    target = total_sup / n_stores if n_stores else 0.0
-                    raw_share = np.maximum(0.0, target - own_arr)
+                    target_cov = total_sup / max(float(fcst_ps.sum()), 1e-6)
+                    raw_share = np.maximum(0.0, target_cov * fcst_ps - own_arr)
                     s_sum = float(raw_share.sum())
                     scaled_note = ""
                     if s_sum > common_pool_sup + 1e-9 and s_sum > 0:
                         raw_share = raw_share * (common_pool_sup / s_sum)
                         scaled_note = " (scaled to fit pool)"
                     supply = own_arr + raw_share
-                    dem_per = demand_X / n_stores if n_stores else 0.0
-                    gaps = np.maximum(0.0, dem_per - supply)
+                    dem_per_arr = demand_X * tw_probs           # per-store horizon demand
+                    gaps = np.maximum(0.0, dem_per_arr - supply)
                     total_gap = float(gaps.sum())
                     under_covered = int((gaps > 0.5).sum())
+                    dem_per = float(dem_per_arr.mean())
                     st.markdown(
                         f"**Concrete example — Supplier per-store gap at W{s['week']}**:"
                     )
                     rows_ps = [
                         {'Quantity': 'Lookahead total demand (next ' + str(cov_sup_local) + ' wks)',
                          'Aggregate': f"{demand_X:.0f}",
-                         'Per store (÷ N)': f"{dem_per:.2f}"},
+                         'Per store (tier-avg)': f"{dem_per:.2f}"},
                         {'Quantity': 'Own dedicated stock (stores + dist pipes)',
                          'Aggregate': f"{float(own_arr.sum()):.0f}",
                          'Per store (avg/min/max)':
@@ -2757,13 +2844,13 @@ if st.session_state.get("show_calcs", False):
                         {'Quantity': f"Common pool to allocate",
                          'Aggregate': f"{common_pool_sup:.0f}",
                          'Notes': scaled_note or "fits without scaling"},
-                        {'Quantity': '⇒ Water-fill target per store (= total / N)',
-                         'Aggregate': f"{target:.2f}",
-                         'Notes': ""},
+                        {'Quantity': '⇒ Target weeks-of-cover after water-fill ((Σ own + pool) / Σ fcst)',
+                         'Aggregate': f"{target_cov:.2f}",
+                         'Notes': "each store i then targets target_cov × fcst[i]"},
                         {'Quantity': '⇒ Stores under-covered after water-fill',
                          'Aggregate': f"{under_covered} / {n_stores}",
                          'Notes': ""},
-                        {'Quantity': '⇒ Sum of per-store gaps (Σ max(0, demand/store − supply[i]))',
+                        {'Quantity': '⇒ Sum of per-store gaps (Σ max(0, dx·prob[i] − supply[i]))',
                          'Aggregate': f"**{total_gap:.0f}**",
                          'Notes': ""},
                     ]
