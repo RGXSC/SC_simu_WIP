@@ -2420,8 +2420,13 @@ if _pf is not None:
 st.components.v1.html(make_sc_html(state, params), height=_viz_h, scrolling=False)
 
 
-# --- Per-store zoom expander (always available, collapsed by default) ---
-with st.expander(f"🔍 Per-store zoom — W{state['week']} ({n_stores} stores)", expanded=False):
+# --- Per-store zoom — session-state-controlled toggle (doesn't close on
+#     week navigation). Falls back to closed-by-default the first time.
+zoom_open = st.toggle(
+    f"🔍 Per-store zoom — {n_stores} stores",
+    key="ps_zoom_open",
+)
+if zoom_open:
     stores_arr = state.get('stores', [])
     per_dem    = state.get('per_store_dem', [])
     per_sales  = state.get('per_store_sales', [])
@@ -2444,13 +2449,121 @@ with st.expander(f"🔍 Per-store zoom — W{state['week']} ({n_stores} stores)"
         t3.metric(f"High stores ({TIER_WEIGHTS['high']:.1f}× rate)",   n_high)
 
         m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("Min stock",  f"{min(stores_arr):.0f}")
+        m1.metric(f"Min stock (W{state['week']})",  f"{min(stores_arr):.0f}")
         m2.metric("Avg stock",  f"{sum(stores_arr)/len(stores_arr):.1f}")
         m3.metric("Max stock",  f"{max(stores_arr):.0f}")
         m4.metric("Std",        f"{float(np.std(stores_arr)):.2f}")
-        m5.metric("Stockout stores (this wk)", f"{state.get('stores_w_stockout', 0)} / {n_stores}")
+        m5.metric("Stockout stores (this wk)",
+                  f"{state.get('stores_w_stockout', 0)} / {n_stores}")
 
-        # Build per-store frame and show 3 histograms + 1 small table
+        # --- Sales matrix: one row per store, one column per week ---
+        st.markdown("**Sales matrix — every store, every week**")
+        st.caption(
+            "🟢 **Sold** (had stock & demand met) · "
+            "🔴 **Missed** (demand but stockout) · "
+            "⚪ **Idle** (no demand this week). "
+            "Rows sorted high → medium → slow tier so top-sellers stay grouped."
+        )
+
+        TIER_RANK = {'high': 0, 'medium': 1, 'slow': 2}
+        # Build long-format frame across all simulated weeks.
+        rows_data = []
+        for w_idx in range(1, len(states)):
+            st_obj = states[w_idx]
+            pd_arr = st_obj.get('per_store_dem', [])
+            ps_arr = st_obj.get('per_store_sales', [])
+            pm_arr = st_obj.get('per_store_missed', [])
+            for i in range(n_stores):
+                dem    = pd_arr[i] if i < len(pd_arr) else 0
+                sales  = ps_arr[i] if i < len(ps_arr) else 0
+                missed = pm_arr[i] if i < len(pm_arr) else 0
+                if missed > 0.5:
+                    s_lbl = "Missed"
+                elif dem > 0.5:
+                    s_lbl = "Sold"
+                else:
+                    s_lbl = "Idle"
+                rows_data.append({
+                    'store':  i + 1,
+                    'tier':   tier_labels[i],
+                    'tier_rank': TIER_RANK.get(tier_labels[i], 3),
+                    'week':   w_idx,
+                    'state':  s_lbl,
+                    'demand': dem,
+                    'sales':  sales,
+                    'missed': missed,
+                })
+        mat_df = pd.DataFrame(rows_data)
+
+        # Cap displayed rows for very large N (stratified sample by tier).
+        MAX_MATRIX_ROWS = 80
+        if n_stores > MAX_MATRIX_ROWS:
+            n_h_show = max(1, int(round(MAX_MATRIX_ROWS * 0.20)))
+            n_m_show = max(1, int(round(MAX_MATRIX_ROWS * 0.30)))
+            n_s_show = MAX_MATRIX_ROWS - n_h_show - n_m_show
+            high_ids   = [i+1 for i, t in enumerate(tier_labels) if t == 'high'][:n_h_show]
+            medium_ids = [i+1 for i, t in enumerate(tier_labels) if t == 'medium'][:n_m_show]
+            slow_ids   = [i+1 for i, t in enumerate(tier_labels) if t == 'slow'][:n_s_show]
+            keep_ids = set(high_ids + medium_ids + slow_ids)
+            mat_df = mat_df[mat_df['store'].isin(keep_ids)]
+            st.caption(
+                f"_Showing {len(keep_ids)} of {n_stores} stores "
+                f"({len(high_ids)} high / {len(medium_ids)} medium / "
+                f"{len(slow_ids)} slow) — first stores of each tier._"
+            )
+
+        # Sort store axis high → medium → slow, then by store id.
+        unique_stores = sorted(
+            mat_df['store'].unique(),
+            key=lambda s: (TIER_RANK.get(tier_labels[s - 1], 3), s),
+        )
+
+        # Highlight the currently-selected week with a vertical rule.
+        current_week_df = pd.DataFrame({'week': [state['week']]})
+
+        # Altair max_rows limit can bite at N×W > 5000 cells.
+        try:
+            alt.data_transformers.disable_max_rows()
+        except Exception:
+            pass
+
+        n_rows = len(unique_stores)
+        row_h  = max(8, min(14, 700 // max(1, n_rows)))
+        heatmap = (
+            alt.Chart(mat_df)
+              .mark_rect(stroke='white', strokeWidth=0.4)
+              .encode(
+                  x=alt.X('week:O', title='Week'),
+                  y=alt.Y('store:O', sort=unique_stores,
+                          title='Store (high → medium → slow)'),
+                  color=alt.Color(
+                      'state:N',
+                      scale=alt.Scale(
+                          domain=['Sold', 'Missed', 'Idle'],
+                          range=['#1a8a4a', '#c0392b', '#e8e8e8'],
+                      ),
+                      legend=alt.Legend(title='Week state', orient='top'),
+                  ),
+                  tooltip=[
+                      alt.Tooltip('store:O', title='Store'),
+                      alt.Tooltip('tier:N',  title='Tier'),
+                      alt.Tooltip('week:O',  title='Week'),
+                      alt.Tooltip('demand:Q', title='Demand'),
+                      alt.Tooltip('sales:Q',  title='Sales'),
+                      alt.Tooltip('missed:Q', title='Missed'),
+                      alt.Tooltip('state:N',  title='State'),
+                  ],
+              )
+              .properties(height=max(180, row_h * n_rows))
+        )
+        current_rule = (
+            alt.Chart(current_week_df)
+              .mark_rule(color='#1a2a40', strokeWidth=2, opacity=0.6)
+              .encode(x='week:O')
+        )
+        st.altair_chart(heatmap + current_rule, use_container_width=True)
+
+        # Per-store snapshot of the currently-selected week.
         per_df = pd.DataFrame({
             'store': list(range(1, len(stores_arr) + 1)),
             'tier':          tier_labels,
@@ -2461,37 +2574,12 @@ with st.expander(f"🔍 Per-store zoom — W{state['week']} ({n_stores} stores)"
             'alloc_in_wk':   allocs_arr if len(allocs_arr) == len(stores_arr) else [0] * len(stores_arr),
             'dist_pipe':     dist_per_store,
         })
-
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.caption("End-of-week stock")
-            ch = (alt.Chart(per_df).mark_bar()
-                  .encode(x=alt.X("stock_end_wk:Q", bin=alt.Bin(maxbins=20), title="Units"),
-                          y=alt.Y("count():Q", title="Stores"))
-                  .properties(height=180))
-            st.altair_chart(ch, use_container_width=True)
-        with c2:
-            st.caption("Sales this week")
-            ch = (alt.Chart(per_df).mark_bar(color="#1a8a4a")
-                  .encode(x=alt.X("sales_wk:Q", bin=alt.Bin(maxbins=20), title="Units"),
-                          y=alt.Y("count():Q", title="Stores"))
-                  .properties(height=180))
-            st.altair_chart(ch, use_container_width=True)
-        with c3:
-            st.caption("Missed this week")
-            ch = (alt.Chart(per_df).mark_bar(color="#c0392b")
-                  .encode(x=alt.X("missed_wk:Q", bin=alt.Bin(maxbins=20), title="Units"),
-                          y=alt.Y("count():Q", title="Stores"))
-                  .properties(height=180))
-            st.altair_chart(ch, use_container_width=True)
-
         if n_stores <= 20:
-            st.caption("Per-store table")
+            st.markdown(f"**Per-store snapshot — W{state['week']}**")
             st.dataframe(per_df, use_container_width=True,
                          hide_index=True, height=min(420, 40 + len(per_df) * 32))
         else:
-            st.caption(f"Per-store table suppressed for N > 20 (showing extremes only). "
-                       f"Top 5 by stockout and bottom 5 by stock:")
+            st.markdown(f"**Per-store snapshot — W{state['week']} (extremes only)**")
             top_miss = per_df.sort_values("missed_wk", ascending=False).head(5)
             low_stk  = per_df.sort_values("stock_end_wk").head(5)
             cc1, cc2 = st.columns(2)
