@@ -313,6 +313,91 @@ def _store_tier_probs(n_stores, rng_seed=None):
     return probs, weights, tiers
 
 
+# Per-store demand is DETERMINISTIC (no RNG). Each bucket follows a fixed
+# rate ratio flagship : medium : small = 15 : 6 : 1, scaled so that the
+# total demand each week equals the user's `dem_total` exactly.
+#
+# Example (user's spec, 6 stores, D=10/wk):
+#   1 flagship  rate 5/wk   ⇒ sells 5/wk every week
+#   2 medium    rate 2/wk   ⇒ each sells 2/wk every week
+#   3 small     rate 1/3/wk ⇒ one sells 1 each week, cycling s1→s2→s3→…
+#
+# Rounding rule: when bucket totals don't sum to dem_total (fractional
+# rates round down to integers), the residual goes to the FLAGSHIP bucket
+# starting from the first flagship. Within medium/small the integer +1
+# from rotation cycles across stores so each store hits its long-run
+# average target.
+def _bucket_counts(n_stores):
+    """How many stores per bucket given the share constants."""
+    n = int(max(1, n_stores))
+    n_flag   = max(1, int(round(n * TIER_SHARE["flagship"])))
+    n_medium = max(1, int(round(n * TIER_SHARE["medium"])))
+    n_small  = n - n_flag - n_medium
+    if n_small < 0:
+        n_small = 0
+        n_medium = max(0, n - n_flag)
+    return n_flag, n_medium, n_small
+
+
+def _deterministic_per_store_demand(week, dem_total, n_flag, n_medium, n_small):
+    """
+    Returns integer per-store demand for `week` (1-indexed), summing to
+    exactly `dem_total`. Store order: flagship[0..n_flag-1],
+    medium[0..n_medium-1], small[0..n_small-1].
+    """
+    N = n_flag + n_medium + n_small
+    dem_total = int(max(0, dem_total))
+    if N == 0 or dem_total == 0:
+        return np.zeros(max(1, N), dtype=int)
+
+    denom = 15.0 * n_flag + 6.0 * n_medium + 1.0 * n_small
+    if denom <= 0:
+        return np.zeros(N, dtype=int)
+
+    bkt_f_int = int(15.0 * n_flag   * dem_total / denom)
+    bkt_m_int = int( 6.0 * n_medium * dem_total / denom)
+    bkt_s_int = int( 1.0 * n_small  * dem_total / denom)
+    # Rounding residual → flagship bucket first (then medium, then small).
+    residual = dem_total - (bkt_f_int + bkt_m_int + bkt_s_int)
+    if residual > 0:
+        give_to_flag   = min(residual, max(0, 15 * n_flag))
+        bkt_f_int     += give_to_flag
+        residual      -= give_to_flag
+        if residual > 0:
+            give_to_med = min(residual, max(0, 6 * n_medium))
+            bkt_m_int  += give_to_med
+            residual   -= give_to_med
+            bkt_s_int  += residual
+
+    demand = np.zeros(N, dtype=int)
+
+    # Flagship: even base + the first `rem` flagships always get +1
+    # (deterministic — rule from spec, lands at target in long run).
+    if n_flag > 0:
+        base = bkt_f_int // n_flag
+        rem  = bkt_f_int -  base * n_flag
+        demand[:n_flag] = base
+        if rem > 0:
+            demand[:rem] += 1
+
+    # Medium / Small: even base + cyclic rotation of the integer remainder
+    # so every store in the bucket hits its long-run average.
+    def _fill(start, n, total):
+        if n == 0 or total == 0:
+            return
+        base = total // n
+        rem  = total - base * n
+        demand[start : start + n] = base
+        if rem > 0:
+            offset = ((week - 1) * rem) % n
+            for k in range(rem):
+                demand[start + ((offset + k) % n)] += 1
+    _fill(n_flag,            n_medium, bkt_m_int)
+    _fill(n_flag + n_medium, n_small,  bkt_s_int)
+
+    return demand
+
+
 # Fixed seed for per-store demand draws (kept out of the UI so the simulator
 # is always reproducible — same inputs, same draws every time).
 FIXED_RNG_SEED = 42
@@ -330,7 +415,8 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
                    price, var_cost, fixed_pct, n_stores, rng_seed, smart_distrib,
                    debug=False,
                    custom_demand=None,
-                   planner_curve=None):
+                   planner_curve=None,
+                   prod_cap=None):
     """
     Run the weekly supply-chain simulation and return a list of per-week state
     dicts (index 0 = W0 initial state, indices 1..weeks = simulated weeks).
@@ -402,9 +488,11 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
     coverage = phys_lt + order_freq
     n_stores = int(max(1, n_stores))
     rng = np.random.default_rng(int(rng_seed))
-    # Tiered store mix (50% slow / 30% medium / 20% high). Same store keeps
-    # its tier all simulation; the multinomial below uses these probabilities
-    # so high stores systematically sell more than slow ones.
+    # Store mix: 10% flagship, 30% medium, 60% small (deterministic order —
+    # stores 1..n_flag are flagships, etc.). Per-store demand is
+    # DETERMINISTIC; rates follow flagship:medium:small = 15:6:1, scaled so
+    # the weekly total equals the user-set demand exactly.
+    n_flag, n_medium, n_small = _bucket_counts(n_stores)
     tier_probs, tier_weights, tier_labels = _store_tier_probs(n_stores, int(rng_seed))
 
     # Per-stage downstream coverages (how many weeks of demand each stage
@@ -536,13 +624,14 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
     for w in range(1, weeks + 1):
         s = {'week': w}
         dem_total = demand[w]
-        # Tiered multinomial split: aggregate stays exactly equal to
-        # dem_total; high-tier stores systematically draw more, slow stores
-        # often draw 0 — same stores all simulation long.
-        if dem_total > 0:
-            per_store_dem = rng.multinomial(int(dem_total), tier_probs)
-        else:
-            per_store_dem = np.zeros(n_stores, dtype=int)
+        # Deterministic per-store demand (no RNG). flagship:medium:small
+        # rates = 15:6:1, scaled so Σ per_store_dem == dem_total exactly
+        # this week. Rounding remainder → flagship bucket first; medium
+        # and small bucket remainders rotate across stores by week so
+        # every store within a bucket hits its long-run average.
+        per_store_dem = _deterministic_per_store_demand(
+            w, int(dem_total), n_flag, n_medium, n_small,
+        )
 
         # Forecast updates only at review weeks (periodic-review blind between).
         # Aggregate forecast is reactive (last week's demand); per-store rates
@@ -738,6 +827,24 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
                 od_fp   = max(od_fp,   od_fp_smart)
                 od_semi = max(od_semi, od_semi_smart)
                 od_sup  = max(od_sup,  od_sup_smart)
+
+            # Total-products production cap. The supplier order is the only
+            # source of NEW material into the chain — clamp it so the sum
+            # of all inventories (stocks + pipes + pre-buffer) never exceeds
+            # the user's prod_cap. Production stages downstream just convert
+            # existing units form-to-form; they don't add to the total.
+            if prod_cap is not None:
+                chain_inv = (
+                    float(raw_mat) + float(semi) + float(cw) +
+                    float(sum(stores)) +
+                    float(sum(mat_pipe)) +
+                    float(sum(semi_pipe)) +
+                    float(sum(fp_pipe)) +
+                    float(sum(sum(dp) for dp in dist_pipes)) +
+                    float(pb)
+                )
+                headroom = max(0.0, float(prod_cap) - chain_inv)
+                od_sup = min(od_sup, headroom)
 
             co            += od_sup
             pb            += od_sup
@@ -2171,6 +2278,23 @@ with st.sidebar:
     )
     custom_demand = [0] + [int(row["Demand (pcs)"]) for _, row in edited.iterrows()]
 
+    # Total-products production cap. Limits the sum of inventory across the
+    # whole chain (stocks + pipes + pb) at any point in time. Min is the
+    # initial stock — the cap can never be less than what the chain
+    # already contains at W0.
+    prod_cap_min = max(10, int(total_stock))
+    if st.session_state.get("prod_cap", prod_cap_min) < prod_cap_min:
+        st.session_state["prod_cap"] = prod_cap_min
+    prod_cap = st.slider(
+        "Max products in chain (total)",
+        min_value=prod_cap_min, max_value=10000, step=50,
+        key="prod_cap",
+        help="Cap on the total units in the chain at any time (stocks + "
+             "pipes + pre-buffer). When the chain hits this cap, the "
+             "supplier order is throttled to zero until consumption frees "
+             "up room. Cannot be less than the initial stock.",
+    )
+
     # Seasonal planner curve: same shape, but UNROUNDED floats scaled to
     # avg=base_forecast. The float form avoids integer rounding drift, so
     # the discovered factor is a clean ratio (e.g., exactly 3.0× for the
@@ -2316,6 +2440,7 @@ params = {
     'debug': debug_mode,
     'custom_demand':  tuple(custom_demand),
     'planner_curve':  tuple(planner_curve) if planner_curve is not None else None,
+    'prod_cap':       int(prod_cap),
 }
 
 states = run_simulation(**params)
