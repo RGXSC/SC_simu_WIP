@@ -269,13 +269,13 @@ def _smart_alloc_n(ship_out, stores_arr, dist_pipes, forecast_per_store):
 
 
 # Store-bucket mix:
-#   flagship  10% × 4.0× rate  → carries 40% of total sales
-#   medium    30% × 1.0× rate  → carries 30%
-#   small     60% × 0.5× rate  → carries 30%
+#   high-selling  10% × 4.0× rate  → carries 40% of total sales
+#   medium        30% × 1.0× rate  → carries 30%
+#   small         60% × 0.5× rate  → carries 30%
 # Mean weight = 0.10·4 + 0.30·1 + 0.60·0.5 = 1.0 (no scaling drift; the
 # multinomial preserves aggregate demand exactly).
-TIER_WEIGHTS = {"small": 0.5, "medium": 1.0, "flagship": 4.0}
-TIER_SHARE   = {"small": 0.60, "medium": 0.30, "flagship": 0.10}
+TIER_WEIGHTS = {"small": 0.5, "medium": 1.0, "high": 4.0}
+TIER_SHARE   = {"small": 0.60, "medium": 0.30, "high": 0.10}
 
 def _store_tier_probs(n_stores, rng_seed=None):
     """
@@ -290,77 +290,77 @@ def _store_tier_probs(n_stores, rng_seed=None):
     -------
     probs   : np.array length N, sum = 1 (feed to rng.multinomial)
     weights : np.array length N, raw tier weights (mean ≈ 1.1)
-    tiers   : list[str] length N, "small" / "medium" / "flagship"
+    tiers   : list[str] length N, "small" / "medium" / "high"
     """
     n = int(max(1, n_stores))
-    n_flag   = max(1, int(round(n * TIER_SHARE["flagship"])))
+    n_high   = max(1, int(round(n * TIER_SHARE["high"])))
     n_medium = max(1, int(round(n * TIER_SHARE["medium"])))
-    n_small  = n - n_flag - n_medium
+    n_small  = n - n_high - n_medium
     if n_small < 0:                                 # very small N: clamp
         n_small = 0
-        n_medium = max(0, n - n_flag)
-    # Deterministic ordering: store 1..n_flag are flagships, next n_medium
+        n_medium = max(0, n - n_high)
+    # Deterministic ordering: store 1..n_high are high-selling stores, next n_medium
     # are medium, the rest are small. Makes the per-store matrix readable
     # without sorting and keeps store ids stable across runs.
     weights = np.concatenate([
-        np.full(n_flag,   TIER_WEIGHTS["flagship"]),
+        np.full(n_high,   TIER_WEIGHTS["high"]),
         np.full(n_medium, TIER_WEIGHTS["medium"]),
         np.full(n_small,  TIER_WEIGHTS["small"]),
     ])
-    tiers = np.where(weights == TIER_WEIGHTS["flagship"], "flagship",
+    tiers = np.where(weights == TIER_WEIGHTS["high"], "high",
              np.where(weights == TIER_WEIGHTS["medium"], "medium", "small")).tolist()
     probs = weights / weights.sum()
     return probs, weights, tiers
 
 
 # Per-store demand is DETERMINISTIC (no RNG). Each bucket follows a fixed
-# rate ratio flagship : medium : small = 15 : 6 : 1, scaled so that the
+# rate ratio high-selling : medium : small = 15 : 6 : 1, scaled so that the
 # total demand each week equals the user's `dem_total` exactly.
 #
 # Example (user's spec, 6 stores, D=10/wk):
-#   1 flagship  rate 5/wk   ⇒ sells 5/wk every week
+#   1 high-selling  rate 5/wk   ⇒ sells 5/wk every week
 #   2 medium    rate 2/wk   ⇒ each sells 2/wk every week
 #   3 small     rate 1/3/wk ⇒ one sells 1 each week, cycling s1→s2→s3→…
 #
 # Rounding rule: when bucket totals don't sum to dem_total (fractional
-# rates round down to integers), the residual goes to the FLAGSHIP bucket
-# starting from the first flagship. Within medium/small the integer +1
+# rates round down to integers), the residual goes to the HIGH-SELLING
+# bucket starting from the first store. Within medium/small the integer +1
 # from rotation cycles across stores so each store hits its long-run
 # average target.
 def _bucket_counts(n_stores):
     """How many stores per bucket given the share constants."""
     n = int(max(1, n_stores))
-    n_flag   = max(1, int(round(n * TIER_SHARE["flagship"])))
+    n_high   = max(1, int(round(n * TIER_SHARE["high"])))
     n_medium = max(1, int(round(n * TIER_SHARE["medium"])))
-    n_small  = n - n_flag - n_medium
+    n_small  = n - n_high - n_medium
     if n_small < 0:
         n_small = 0
-        n_medium = max(0, n - n_flag)
-    return n_flag, n_medium, n_small
+        n_medium = max(0, n - n_high)
+    return n_high, n_medium, n_small
 
 
-def _deterministic_per_store_demand(week, dem_total, n_flag, n_medium, n_small):
+def _deterministic_per_store_demand(week, dem_total, n_high, n_medium, n_small):
     """
     Returns integer per-store demand for `week` (1-indexed), summing to
-    exactly `dem_total`. Store order: flagship[0..n_flag-1],
+    exactly `dem_total`. Store order: high-selling[0..n_high-1],
     medium[0..n_medium-1], small[0..n_small-1].
     """
-    N = n_flag + n_medium + n_small
+    N = n_high + n_medium + n_small
     dem_total = int(max(0, dem_total))
     if N == 0 or dem_total == 0:
         return np.zeros(max(1, N), dtype=int)
 
-    denom = 15.0 * n_flag + 6.0 * n_medium + 1.0 * n_small
+    denom = 15.0 * n_high + 6.0 * n_medium + 1.0 * n_small
     if denom <= 0:
         return np.zeros(N, dtype=int)
 
-    bkt_f_int = int(15.0 * n_flag   * dem_total / denom)
+    bkt_f_int = int(15.0 * n_high   * dem_total / denom)
     bkt_m_int = int( 6.0 * n_medium * dem_total / denom)
     bkt_s_int = int( 1.0 * n_small  * dem_total / denom)
-    # Rounding residual → flagship bucket first (then medium, then small).
+    # Rounding residual → high-selling bucket first (then medium, then small).
     residual = dem_total - (bkt_f_int + bkt_m_int + bkt_s_int)
     if residual > 0:
-        give_to_flag   = min(residual, max(0, 15 * n_flag))
+        give_to_flag   = min(residual, max(0, 15 * n_high))
         bkt_f_int     += give_to_flag
         residual      -= give_to_flag
         if residual > 0:
@@ -371,12 +371,12 @@ def _deterministic_per_store_demand(week, dem_total, n_flag, n_medium, n_small):
 
     demand = np.zeros(N, dtype=int)
 
-    # Flagship: even base + the first `rem` flagships always get +1
+    # High-Selling: even base + the first `rem` high-selling stores always get +1
     # (deterministic — rule from spec, lands at target in long run).
-    if n_flag > 0:
-        base = bkt_f_int // n_flag
-        rem  = bkt_f_int -  base * n_flag
-        demand[:n_flag] = base
+    if n_high > 0:
+        base = bkt_f_int // n_high
+        rem  = bkt_f_int -  base * n_high
+        demand[:n_high] = base
         if rem > 0:
             demand[:rem] += 1
 
@@ -392,8 +392,8 @@ def _deterministic_per_store_demand(week, dem_total, n_flag, n_medium, n_small):
             offset = ((week - 1) * rem) % n
             for k in range(rem):
                 demand[start + ((offset + k) % n)] += 1
-    _fill(n_flag,            n_medium, bkt_m_int)
-    _fill(n_flag + n_medium, n_small,  bkt_s_int)
+    _fill(n_high,            n_medium, bkt_m_int)
+    _fill(n_high + n_medium, n_small,  bkt_s_int)
 
     return demand
 
@@ -488,11 +488,11 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
     coverage = phys_lt + order_freq
     n_stores = int(max(1, n_stores))
     rng = np.random.default_rng(int(rng_seed))
-    # Store mix: 10% flagship, 30% medium, 60% small (deterministic order —
-    # stores 1..n_flag are flagships, etc.). Per-store demand is
-    # DETERMINISTIC; rates follow flagship:medium:small = 15:6:1, scaled so
+    # Store mix: 10% high-selling, 30% medium, 60% small (deterministic order —
+    # stores 1..n_high are high-selling stores, etc.). Per-store demand is
+    # DETERMINISTIC; rates follow high-selling:medium:small = 15:6:1, scaled so
     # the weekly total equals the user-set demand exactly.
-    n_flag, n_medium, n_small = _bucket_counts(n_stores)
+    n_high, n_medium, n_small = _bucket_counts(n_stores)
     tier_probs, tier_weights, tier_labels = _store_tier_probs(n_stores, int(rng_seed))
 
     # Per-stage downstream coverages (how many weeks of demand each stage
@@ -631,13 +631,13 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
     for w in range(1, weeks + 1):
         s = {'week': w}
         dem_total = demand[w]
-        # Deterministic per-store demand (no RNG). flagship:medium:small
+        # Deterministic per-store demand (no RNG). high-selling:medium:small
         # rates = 15:6:1, scaled so Σ per_store_dem == dem_total exactly
-        # this week. Rounding remainder → flagship bucket first; medium
+        # this week. Rounding remainder → high-selling bucket first; medium
         # and small bucket remainders rotate across stores by week so
         # every store within a bucket hits its long-run average.
         per_store_dem = _deterministic_per_store_demand(
-            w, int(dem_total), n_flag, n_medium, n_small,
+            w, int(dem_total), n_high, n_medium, n_small,
         )
 
         # Forecast updates only at review weeks (periodic-review blind between).
@@ -2232,7 +2232,7 @@ with st.sidebar:
     smart_distrib = st.toggle("Smart Distribution (need-based)", key="smart_distrib")
     st.caption(
         f"**{n_stores} stores** — mix is "
-        f"**10% flagship** ({TIER_WEIGHTS['flagship']:.1f}× avg, carries ~40% of sales), "
+        f"**10% high-selling** ({TIER_WEIGHTS['high']:.1f}× avg, carries ~40% of sales), "
         f"**30% medium** ({TIER_WEIGHTS['medium']:.1f}× avg, ~30%), "
         f"**60% small** ({TIER_WEIGHTS['small']:.1f}× avg, ~30%, often 0 sales/wk). "
         f"Same store keeps its bucket all simulation."
@@ -2599,9 +2599,9 @@ if zoom_open:
     else:
         n_small    = tier_labels.count('small')
         n_medium   = tier_labels.count('medium')
-        n_flagship = tier_labels.count('flagship')
+        n_high_lbl = tier_labels.count('high')
         t1, t2, t3 = st.columns(3)
-        t1.metric(f"Flagship ({TIER_WEIGHTS['flagship']:.1f}× rate)", n_flagship)
+        t1.metric(f"High-Selling ({TIER_WEIGHTS['high']:.1f}× rate)", n_high_lbl)
         t2.metric(f"Medium ({TIER_WEIGHTS['medium']:.1f}× rate)",     n_medium)
         t3.metric(f"Small ({TIER_WEIGHTS['small']:.1f}× rate)",       n_small)
 
@@ -2620,7 +2620,7 @@ if zoom_open:
             "🔴 **Missed** (demand but stockout) · "
             "🟡 **Held** (had stock, no demand — paid carrying cost for nothing) · "
             "⚪ **Idle** (no stock, no demand). "
-            "Stores are numbered flagship → medium → small."
+            "Stores are numbered 1..N from high-selling (top of chart) to small (bottom)."
         )
 
         # Build long-format frame across all simulated weeks.
@@ -2638,11 +2638,14 @@ if zoom_open:
                 sales  = ps_arr[i]  if i < len(ps_arr)  else 0
                 missed = pm_arr[i]  if i < len(pm_arr)  else 0
                 stk    = stk_arr[i] if i < len(stk_arr) else 0
+                # Any positive end-of-week stock means the store is HELD,
+                # not Idle. Stocks are rounded to 1 dp upstream so we use
+                # a tight epsilon — 0.05 catches everything ≥ 0.1.
                 if missed > 0.5:
                     s_lbl = "Missed"
                 elif dem > 0.5:
                     s_lbl = "Sold"
-                elif stk > 0.5:
+                elif stk > 0.05:
                     s_lbl = "Held"
                 else:
                     s_lbl = "Idle"
@@ -2662,21 +2665,21 @@ if zoom_open:
         # from the START of each tier block — stores are already in order).
         MAX_MATRIX_ROWS = 80
         if n_stores > MAX_MATRIX_ROWS:
-            n_f_show = max(1, int(round(MAX_MATRIX_ROWS * TIER_SHARE['flagship'])))
+            n_f_show = max(1, int(round(MAX_MATRIX_ROWS * TIER_SHARE['high'])))
             n_m_show = max(1, int(round(MAX_MATRIX_ROWS * TIER_SHARE['medium'])))
             n_s_show = MAX_MATRIX_ROWS - n_f_show - n_m_show
-            flag_ids   = [i+1 for i, t in enumerate(tier_labels) if t == 'flagship'][:n_f_show]
+            high_ids   = [i+1 for i, t in enumerate(tier_labels) if t == 'high'][:n_f_show]
             medium_ids = [i+1 for i, t in enumerate(tier_labels) if t == 'medium'][:n_m_show]
             small_ids  = [i+1 for i, t in enumerate(tier_labels) if t == 'small'][:n_s_show]
-            keep_ids = set(flag_ids + medium_ids + small_ids)
+            keep_ids = set(high_ids + medium_ids + small_ids)
             mat_df = mat_df[mat_df['store'].isin(keep_ids)]
             st.caption(
                 f"_Showing {len(keep_ids)} of {n_stores} stores "
-                f"({len(flag_ids)} flagship / {len(medium_ids)} medium / "
+                f"({len(high_ids)} high-selling / {len(medium_ids)} medium / "
                 f"{len(small_ids)} small) — first stores of each tier._"
             )
 
-        # Stores are now numbered flagship → medium → small (1..N), so
+        # Stores are now numbered high-selling → medium → small (1..N), so
         # ordering by store id gives the right group sequence.
         unique_stores = sorted(mat_df['store'].unique())
 
@@ -2697,7 +2700,7 @@ if zoom_open:
               .encode(
                   x=alt.X('week:O', title='Week'),
                   y=alt.Y('store:O', sort=unique_stores,
-                          title='Store (flagship → medium → small)'),
+                          title='Store — top: high-selling · bottom: small'),
                   color=alt.Color(
                       'state:N',
                       scale=alt.Scale(
@@ -2729,7 +2732,7 @@ if zoom_open:
         # --- Per-bucket synthesis for the currently-selected week ---
         st.markdown(f"**Per-bucket synthesis — W{state['week']}**")
         ps_rate_arr = state.get('ps_rate', [0.0] * n_stores)
-        bucket_order = ['flagship', 'medium', 'small']
+        bucket_order = ['high', 'medium', 'small']
         bkt_rows = []
         for bkt in bucket_order:
             idx = [i for i, t in enumerate(tier_labels) if t == bkt]
@@ -2765,8 +2768,8 @@ if zoom_open:
                      height=40 + len(bkt_df) * 38)
         st.caption(
             "_Service % = sales / demand for the bucket this week. "
-            "Watch flagships vs. small: a healthy plan keeps service high "
-            "for flagships (where most of the revenue lives) without "
+            "Watch high-selling stores vs. small: a healthy plan keeps service high "
+            "for high-selling stores (where most of the revenue lives) without "
             "letting the small bucket pile up unused stock (Held cells)._"
         )
 
@@ -2798,13 +2801,13 @@ if st.session_state.get("show_calcs", False):
             avail_total = store_start_total + arr_total
             overall_state = "fully met" if s['missed'] < 0.5 else "partially met"
             stockout_n = s.get('stores_w_stockout', 0)
-            n_flag_lbl   = states[0].get('tier_labels', []).count('flagship')
+            n_high_lbl   = states[0].get('tier_labels', []).count('high')
             n_medium_lbl = states[0].get('tier_labels', []).count('medium')
             n_small_lbl  = states[0].get('tier_labels', []).count('small')
             st.markdown(
                 f"This week's total customer demand is **{s['demand']:.0f} units**, "
                 f"drawn stochastically (multinomial) across **{n_stores} stores** "
-                f"split into **{n_flag_lbl} flagship** ({TIER_WEIGHTS['flagship']:.1f}× rate), "
+                f"split into **{n_high_lbl} high-selling** ({TIER_WEIGHTS['high']:.1f}× rate), "
                 f"**{n_medium_lbl} medium** ({TIER_WEIGHTS['medium']:.1f}× rate), "
                 f"**{n_small_lbl} small** ({TIER_WEIGHTS['small']:.1f}× rate). "
                 f"Same store keeps its tier every week.\n\n"
