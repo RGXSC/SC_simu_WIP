@@ -677,10 +677,10 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
         sales = float(per_store_sales.sum())
         missed = float(per_store_missed.sum())
         s.update({
-            'stores': [round(x, 1) for x in stores.tolist()],
-            'store_stock': round(float(stores.sum()), 1),
-            'stores_min':  round(float(stores.min()), 1),
-            'stores_max':  round(float(stores.max()), 1),
+            'stores': [int(round(x)) for x in stores.tolist()],
+            'store_stock': int(round(float(stores.sum()))),
+            'stores_min':  int(round(float(stores.min()))),
+            'stores_max':  int(round(float(stores.max()))),
             'stores_mean': round(float(stores.mean()), 2),
             'stores_std':  round(float(stores.std()), 2),
             'stores_w_stockout': int((per_store_missed > 0.5).sum()),
@@ -2616,11 +2616,13 @@ if zoom_open:
         # --- Sales matrix: one row per store, one column per week ---
         st.markdown("**Sales matrix — every store, every week**")
         st.caption(
-            "🟢 **Sold** (had stock, demand met) · "
-            "🔴 **Missed** (demand but stockout) · "
-            "🟡 **Held** (had stock, no demand — paid carrying cost for nothing) · "
-            "⚪ **Idle** (no stock, no demand). "
-            "Stores are numbered 1..N from high-selling (top of chart) to small (bottom)."
+            "🟢 **Sold** (store had stock, demand met) · "
+            "🔴 **Missed** (demand hit but the store was empty) · "
+            "🟡 **Held** (store has stock, no demand this week) · "
+            "⚪ **Idle** (this store is empty AND no demand). "
+            "Idle is a per-store state — stock can still sit in CW or upstream stages "
+            "without being visible here. Stores are numbered 1..N from high-selling "
+            "(top of chart) to small (bottom)."
         )
 
         # Build long-format frame across all simulated weeks.
@@ -2638,14 +2640,16 @@ if zoom_open:
                 sales  = ps_arr[i]  if i < len(ps_arr)  else 0
                 missed = pm_arr[i]  if i < len(pm_arr)  else 0
                 stk    = stk_arr[i] if i < len(stk_arr) else 0
-                # Any positive end-of-week stock means the store is HELD,
-                # not Idle. Stocks are rounded to 1 dp upstream so we use
-                # a tight epsilon — 0.05 catches everything ≥ 0.1.
+                # Stocks are integer-valued — `>= 1` is the right test for
+                # "any unit left at this store". Held = the store itself
+                # still holds product; Idle = this store is empty (stock
+                # may still sit in CW or earlier stages, that's a chain-
+                # level state not shown here).
                 if missed > 0.5:
                     s_lbl = "Missed"
                 elif dem > 0.5:
                     s_lbl = "Sold"
-                elif stk > 0.05:
+                elif stk >= 1:
                     s_lbl = "Held"
                 else:
                     s_lbl = "Idle"
