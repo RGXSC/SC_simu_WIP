@@ -260,12 +260,32 @@ def _smart_alloc_n(ship_out, stores_arr, dist_pipes, forecast_per_store):
         for j in range(n):
             allocs[order[j]] += remaining * fcst_sorted[j] / fcst.sum()
 
-    int_allocs = np.round(allocs).astype(int)
-    diff = int(ship_out) - int(int_allocs.sum())
-    if diff != 0:
-        biggest = int(np.argmax(fcst))
-        int_allocs[biggest] += diff
-    return int_allocs
+    # Largest-remainder rounding (Hamilton's method). Floor each, then
+    # distribute the integer remainder by largest fractional part — tie-
+    # broken by LOWEST current cover so the +1 goes where it helps most.
+    # Avoids the previous bug where the whole rounding residual was dumped
+    # on argmax(fcst), making one store hoard hundreds of units when many
+    # peers shared the same top forecast.
+    floors  = np.floor(allocs).astype(int)
+    diff    = int(ship_out) - int(floors.sum())
+    if diff > 0:
+        fracs = allocs - floors
+        order_add = np.lexsort((cov, -fracs))  # primary -fracs desc, secondary cov asc
+        floors[order_add[:diff]] += 1
+    elif diff < 0:
+        # Surplus to remove — take from stores with smallest fractional
+        # remainder first (least entitled to a round-up), ties broken by
+        # highest current cover (least-needy store).
+        fracs = allocs - floors
+        order_sub = np.lexsort((-cov, fracs))  # primary fracs asc, secondary cov desc
+        k = 0
+        for idx in order_sub:
+            if k >= -diff:
+                break
+            if floors[idx] > 0:
+                floors[idx] -= 1
+                k += 1
+    return floors
 
 
 # Store-bucket mix:
