@@ -621,6 +621,13 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
     }
     states = [s0]
 
+    # Cumulative-production cap. The user's "max products in chain" is a
+    # LIFETIME budget: initial stock at W0 + all units the supplier ships
+    # over the simulation can never exceed prod_cap. Once exhausted, no
+    # more supplier orders are placed. Initial stock counts as production
+    # already done at W0.
+    cum_produced = float(init_store + init_cw + init_semi + init_rawmat)
+
     for w in range(1, weeks + 1):
         s = {'week': w}
         dem_total = demand[w]
@@ -828,23 +835,13 @@ def run_simulation(weeks, init_store, init_cw, init_semi, init_rawmat,
                 od_semi = max(od_semi, od_semi_smart)
                 od_sup  = max(od_sup,  od_sup_smart)
 
-            # Total-products production cap. The supplier order is the only
-            # source of NEW material into the chain — clamp it so the sum
-            # of all inventories (stocks + pipes + pre-buffer) never exceeds
-            # the user's prod_cap. Production stages downstream just convert
-            # existing units form-to-form; they don't add to the total.
+            # Cumulative production cap. Initial stock + every supplier
+            # order placed over the run must never exceed prod_cap.
+            # Once the lifetime budget is spent, od_sup is forced to 0.
             if prod_cap is not None:
-                chain_inv = (
-                    float(raw_mat) + float(semi) + float(cw) +
-                    float(sum(stores)) +
-                    float(sum(mat_pipe)) +
-                    float(sum(semi_pipe)) +
-                    float(sum(fp_pipe)) +
-                    float(sum(sum(dp) for dp in dist_pipes)) +
-                    float(pb)
-                )
-                headroom = max(0.0, float(prod_cap) - chain_inv)
+                headroom = max(0.0, float(prod_cap) - cum_produced)
                 od_sup = min(od_sup, headroom)
+            cum_produced += od_sup
 
             co            += od_sup
             pb            += od_sup
@@ -2145,6 +2142,25 @@ with st.sidebar:
     )
     total_stock = st.slider("Total Initial Stock (pcs)", min_value=0, max_value=10000, step=50, key="total_stock")
 
+    # Lifetime production cap: initial stock (already in the chain at W0)
+    # + every supplier order placed over the simulation must never exceed
+    # this. Cannot be set below `total_stock` — the chain already has that
+    # much "produced" at W0.
+    prod_cap_min = max(10, int(total_stock))
+    _prev_cap = st.session_state.get("prod_cap", prod_cap_min)
+    if _prev_cap < prod_cap_min:
+        st.session_state["prod_cap"] = prod_cap_min
+    prod_cap = st.slider(
+        "Max total products (lifetime)",
+        min_value=prod_cap_min, max_value=10000, step=50,
+        key="prod_cap",
+        help="Cumulative production budget over the whole simulation. "
+             "Counts initial stock (already in the chain at W0) plus "
+             "every unit the supplier ships afterwards. Once exhausted, "
+             "supplier orders are forced to 0. Cannot be less than the "
+             "initial stock above.",
+    )
+
     st.caption("Distribution (% of total):")
     # Guard against stale percentages summing > 100 after a preset switch
     _sp  = st.session_state.get("store_pct", 40)
@@ -2277,23 +2293,6 @@ with st.sidebar:
         key="demand_editor",
     )
     custom_demand = [0] + [int(row["Demand (pcs)"]) for _, row in edited.iterrows()]
-
-    # Total-products production cap. Limits the sum of inventory across the
-    # whole chain (stocks + pipes + pb) at any point in time. Min is the
-    # initial stock — the cap can never be less than what the chain
-    # already contains at W0.
-    prod_cap_min = max(10, int(total_stock))
-    if st.session_state.get("prod_cap", prod_cap_min) < prod_cap_min:
-        st.session_state["prod_cap"] = prod_cap_min
-    prod_cap = st.slider(
-        "Max products in chain (total)",
-        min_value=prod_cap_min, max_value=10000, step=50,
-        key="prod_cap",
-        help="Cap on the total units in the chain at any time (stocks + "
-             "pipes + pre-buffer). When the chain hits this cap, the "
-             "supplier order is throttled to zero until consumption frees "
-             "up room. Cannot be less than the initial stock.",
-    )
 
     # Seasonal planner curve: same shape, but UNROUNDED floats scaled to
     # avg=base_forecast. The float form avoids integer rounding drift, so
