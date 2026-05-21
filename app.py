@@ -2665,23 +2665,9 @@ if zoom_open:
                 })
         mat_df = pd.DataFrame(rows_data)
 
-        # Cap displayed rows for very large N (proportional slice by tier
-        # from the START of each tier block — stores are already in order).
-        MAX_MATRIX_ROWS = 80
-        if n_stores > MAX_MATRIX_ROWS:
-            n_f_show = max(1, int(round(MAX_MATRIX_ROWS * TIER_SHARE['high'])))
-            n_m_show = max(1, int(round(MAX_MATRIX_ROWS * TIER_SHARE['medium'])))
-            n_s_show = MAX_MATRIX_ROWS - n_f_show - n_m_show
-            high_ids   = [i+1 for i, t in enumerate(tier_labels) if t == 'high'][:n_f_show]
-            medium_ids = [i+1 for i, t in enumerate(tier_labels) if t == 'medium'][:n_m_show]
-            small_ids  = [i+1 for i, t in enumerate(tier_labels) if t == 'small'][:n_s_show]
-            keep_ids = set(high_ids + medium_ids + small_ids)
-            mat_df = mat_df[mat_df['store'].isin(keep_ids)]
-            st.caption(
-                f"_Showing {len(keep_ids)} of {n_stores} stores "
-                f"({len(high_ids)} high-selling / {len(medium_ids)} medium / "
-                f"{len(small_ids)} small) — first stores of each tier._"
-            )
+        # Show ALL stores. For large N the chart gets tall — Streamlit
+        # handles the scroll, and each row stays at least 3 px so tier
+        # bands remain visible.
 
         # Stores are now numbered high-selling → medium → small (1..N), so
         # ordering by store id gives the right group sequence.
@@ -2697,7 +2683,18 @@ if zoom_open:
             pass
 
         n_rows = len(unique_stores)
-        row_h  = max(8, min(14, 700 // max(1, n_rows)))
+        # Aim for ~14 px per row when N is small, scale down to 3 px floor
+        # for N up to 500. The chart scrolls inside Streamlit's container
+        # for very tall N.
+        if n_rows <= 50:
+            row_h = 14
+        elif n_rows <= 100:
+            row_h = 10
+        elif n_rows <= 250:
+            row_h = 6
+        else:
+            row_h = max(3, 1500 // n_rows)
+        chart_h = max(180, row_h * n_rows)
         heatmap = (
             alt.Chart(mat_df)
               .mark_rect(stroke='white', strokeWidth=0.4)
@@ -2724,7 +2721,7 @@ if zoom_open:
                       alt.Tooltip('state:N',    title='State'),
                   ],
               )
-              .properties(height=max(180, row_h * n_rows))
+              .properties(height=chart_h)
         )
         current_rule = (
             alt.Chart(current_week_df)
