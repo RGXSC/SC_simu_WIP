@@ -259,16 +259,56 @@ def USER_GUIDE_BODY(doc):
         "of demand the system must hold to avoid stockouts between reviews. It drives "
         "both the recommended initial stock and the in-loop ordering rule.")
 
-    H2(doc, "The ordering rule (periodic review, single-echelon target)")
+    H2(doc, "Per-stage coverage (each push point has its own horizon)")
+    P(doc,
+        "The planner does not place a single order to the supplier. Each of the four "
+        "push points reviews its own position and places its own order, against a "
+        "coverage window that spans only the lead time DOWNSTREAM of that point plus "
+        "the order frequency. A unit released at a downstream stage needs less lead "
+        "time to reach a store, so it carries a shorter coverage target:")
+    TABLE(doc,
+          ["Push point", "Order target", "Coverage window (weeks)"],
+          [
+              ["Supplier (RM in)",  "od_sup",  "mat_lt + semi_lt + fp_lt + dist_lt + freq"],
+              ["Semi (RM → Semi)",  "od_semi", "semi_lt + fp_lt + dist_lt + freq"],
+              ["Finishing (Semi → FP)", "od_fp",   "fp_lt + dist_lt + freq"],
+              ["CW push (FP → store)",  "od_ship", "dist_lt + freq"],
+          ],
+          widths_cm=[3.8, 2.6, 7.2])
+
+    H2(doc, "The ordering rule (periodic review, multi-echelon targets)")
     CODE(doc,
         "if w in review_weeks:\n"
-        "    target   = forecast × coverage\n"
-        "    existing = stores + WIP + buffers + supplier_backlog\n"
-        "    order    = max(0, target − existing)")
+        "    for stage in [sup, semi, fp, ship]:\n"
+        "        target_x   = forecast × coverage_x        # demand to cover\n"
+        "        existing_x = (stores + every unit already AT or DOWNSTREAM\n"
+        "                      of this stage's push point) + this stage's backlog\n"
+        "        order_x    = max(0, target_x − existing_x)\n"
+        "        backlog_x += order_x                       # accrues to the stage")
     P(doc,
-        "On non-review weeks, the order is zero. The forecast updates only on review "
+        "Each stage's existing-count includes only inventory from that stage's push "
+        "point downstream, plus that stage's own outstanding backlog — so consecutive "
+        "reviews never double-count, and an upstream order does not suppress a "
+        "downstream one. The four orders accrue to four independent backlogs (supplier "
+        "pre-buffer, semi, fp, ship). Each processing or shipping step later in the "
+        "week consumes against its OWN backlog: RM→Semi draws down the semi backlog, "
+        "Semi→FP the fp backlog, and the CW→store push the ship backlog. This is what "
+        "‘advanced stage ordering' means — every stage pulls work forward on its own "
+        "shorter horizon instead of waiting for one chain-level order to propagate.")
+    P(doc,
+        "On non-review weeks, all orders are zero. The forecast updates only on review "
         "weeks (the planner re-bases on the latest observed demand). This intentionally "
         "models the periodic-review information lag that hurts Push more than Agile.")
+
+    H2(doc, "Per-store gap adjustment (smart distribution only)")
+    P(doc,
+        "Pooled stage targets answer ‘does the chain hold enough in aggregate?' but can "
+        "miss the case where one store is starving while another sits on surplus. When "
+        "smart distribution is on, each stage also computes a per-store gap: it works "
+        "out the cover-equalizing share of the common upstream pool that the CW push "
+        "will actually deliver, then sums each store's remaining shortfall. The final "
+        "stage order is the MAX of the pooled order and this per-store gap, so ordering "
+        "and execution use the same allocation logic.")
 
     H2(doc, "Capacity ramp")
     P(doc,
@@ -282,13 +322,50 @@ def USER_GUIDE_BODY(doc):
     # ─── Page 4: Forecasting and replenishment ──────────────────
     H1(doc, "3. Forecasting and Replenishment Logic")
 
-    H2(doc, "What the planner sees")
+    H2(doc, "What the planner sees (two forecast regimes)")
     P(doc,
-        "On each review week the planner observes the current week's actual demand and "
-        "treats it as the forward-looking forecast for ordering purposes. There is no "
-        "moving-average smoothing or exponential-smoothing layer — the simulator delib"
-        "erately uses the simplest possible signal so that the comparison between Agile "
-        "and Push isolates the structural effects of lead time and review frequency.")
+        "The simulator runs one of two forecast regimes depending on the demand "
+        "profile:")
+    BULLETS(doc, [
+        "Flat / Ramp / Drop (no seasonal curve): on each review week the planner "
+        "observes the current week's actual demand and treats it as the flat "
+        "forward-looking rate. Each stage target is simply forecast × coverage_x. "
+        "No smoothing layer — the simplest possible signal, so the comparison "
+        "isolates the structural effects of lead time and review frequency.",
+        "Seasonal: the planner holds a believed demand SHAPE (the planner curve) "
+        "but does not know its MAGNITUDE until the season starts. Targets are a "
+        "forward look-ahead over that curve, scaled by a factor discovered at the "
+        "first review (next subsection).",
+    ])
+
+    H2(doc, "Seasonal: actual sales guessed in the first review period")
+    P(doc,
+        "A seasonal planner knows the season is, say, ‘steep, peaking around week 6,' "
+        "but cannot know in advance whether this year sells at an average of 30, 100 "
+        "or 300 a week. The simulator models exactly this. The planner curve encodes "
+        "the believed shape, normalized to an average of 100/wk. On the FIRST review "
+        "week the planner compares cumulative actual demand so far against the "
+        "cumulative curve over the same weeks and locks a single scaling factor:")
+    CODE(doc,
+        "# locked once, at the first review week only\n"
+        "f = Σ actual_demand[1..w]  /  Σ planner_curve[1..w]")
+    P(doc,
+        "From then on, every stage target is a forward sum over the believed curve, "
+        "scaled by that discovered factor:")
+    CODE(doc,
+        "target_x = f × Σ planner_curve[w+1 .. w+coverage_x]   (capped at sim end)")
+    P(doc,
+        "So if the believed average was 100/wk but the first period sells through at "
+        "roughly 3×, the planner locks f ≈ 3.0 and scales its entire forward plan up "
+        "by 3× — it has ‘guessed' the season's magnitude from the opening weeks and "
+        "commits to it. The factor is snapped to a clean integer (or 0.1 increment) "
+        "when the observed ratio is within rounding-drift distance, because the "
+        "integer weekly demand the presets generate produces ratios that are nearly "
+        "but not exactly clean (e.g. an avg-300 curve against an avg-100 belief reads "
+        "as ~2.99 rather than 3.00). Snapping keeps the displayed factor readable "
+        "without changing behaviour. Once locked, the factor never re-bases — a wrong "
+        "first guess is carried for the rest of the season, which is the whole point: "
+        "long-cycle planners live with their opening-period read.")
 
     H2(doc, "What goes into the existing-stock count")
     P(doc,
@@ -303,6 +380,13 @@ def USER_GUIDE_BODY(doc):
     P(doc,
         "This means that as the supplier accumulates a backlog, the planner does NOT "
         "re-order the same units — they are already on the books.")
+    P(doc,
+        "The list above is the SUPPLIER stage's existing-count. Each downstream stage "
+        "uses a narrower slice: the Semi order ignores raw material and the Material "
+        "pipe (those cannot reach a store within its shorter coverage), the Finishing "
+        "order ignores everything upstream of the FP pipe, and the CW push counts only "
+        "store stock plus distribution pipes. Each stage also adds its own backlog, "
+        "never another stage's, so the four orders stay independent.")
 
     H2(doc, "Initial stock recommendation")
     P(doc,
@@ -822,6 +906,44 @@ def DEV_GUIDE_BODY(doc):
         "SEASONAL_BASE_STOCK, SELL_THROUGH_SEASONAL — seasonal sizing rule.",
         "SEASONAL_PARAMS — gamma curve shape (peak position, k).",
     ])
+
+    H3(doc, "Inside the weekly loop — multi-echelon ordering")
+    P(doc,
+        "run_simulation orders at four push points every review week, each with its "
+        "own coverage horizon. Search these variables in the engine:")
+    TABLE(doc,
+          ["Variable", "Meaning"],
+          [
+              ["cov_sup / cov_semi / cov_fp / cov_ship", "Per-stage coverage windows (downstream LT + freq)."],
+              ["existing_sup / _semi / _fp / _ship",     "Inventory counted from each push point downstream + that stage's backlog."],
+              ["tgt_sup / _semi / _fp / _ship",          "Demand-to-cover target for each stage."],
+              ["od_sup / od_semi / od_fp / od_ship",     "max(0, target − existing) — the order accrued to each stage's backlog."],
+              ["pb / semi_backlog / fp_backlog / ship_backlog", "The four independent backlogs each step draws against."],
+          ],
+          widths_cm=[5.6, 9.4])
+    P(doc,
+        "To change a stage's horizon, edit its cov_* expression. To make a stage order "
+        "more or less aggressively, edit its existing_* set (what it is allowed to "
+        "count as already-covered). The per-store gap block (guarded by smart_distrib) "
+        "raises a stage's order when one store would starve; remove it to revert to "
+        "pooled-only ordering.")
+
+    H3(doc, "Inside the weekly loop — seasonal factor discovery")
+    P(doc,
+        "When a planner_curve is passed in (seasonal_mode), the engine locks a single "
+        "scaling factor at the first review week, then look-aheads over the curve:")
+    BULLETS(doc, [
+        "planner_curve_internal — the believed shape (avg ≈ 100/wk), index 0 unused.",
+        "planner_factor — locked once: Σ actual_demand[1..w] / Σ curve[1..w], then "
+        "snapped to a clean integer or 0.1 increment within rounding tolerance.",
+        "_lookahead_sum(curve, w_from, w_to) — forward sum of the curve over a stage's "
+        "coverage window, multiplied by planner_factor. This produces tgt_* in "
+        "seasonal mode (the flat path uses ff × cov_x instead).",
+    ])
+    P(doc,
+        "The factor never re-bases after the first review — that is intentional. To "
+        "let the planner re-learn each review, move the planner_factor assignment out "
+        "of the `if planner_factor is None` guard.")
 
     PAGE_BREAK(doc)
 
