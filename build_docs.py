@@ -162,11 +162,13 @@ def USER_GUIDE_BODY(doc):
 
     H2(doc, "Executive Summary")
     P(doc,
-        "This tool simulates a 26-week, two-store supply chain across four physical "
-        "stages (Material → Semi → Finishing+CW → Distribution). It compares Push and "
-        "Agile architectures across three demand regimes (Flat, Growth, Drop) plus "
-        "Seasonal patterns, and quantifies the financial impact of lead time, order "
-        "frequency, stock distribution, and reactive distribution.")
+        "This tool simulates a 26-week, multi-store supply chain across four physical "
+        "stages (Material → Semi → Finishing+CW → Distribution). The store network is "
+        "configurable (10–500 stores) and split into three sell-rate tiers "
+        "(high-selling / medium / small). It compares Push and Agile architectures "
+        "across three demand regimes (Flat, Growth, Drop) plus Seasonal patterns, and "
+        "quantifies the financial impact of lead time, order frequency, stock "
+        "distribution, reactive distribution, and a lifetime production cap.")
 
     H3(doc, "What the simulator demonstrates")
     BULLETS(doc, [
@@ -214,10 +216,10 @@ def USER_GUIDE_BODY(doc):
     H2(doc, "The physical model")
     P(doc,
         "A single product flows through four sequential stages, each with its own lead "
-        "time and capacity. Two retail stores draw from a shared central warehouse (CW). "
-        "Demand is split between the stores by a configurable percentage. The supplier "
-        "ships raw material into the Material pipe; capacity ramps linearly once the "
-        "factory is activated by the first order.")
+        "time and capacity. A configurable network of retail stores (10–500) draws from "
+        "a shared central warehouse (CW). The supplier ships raw material into the "
+        "Material pipe; capacity ramps linearly once the factory is activated by the "
+        "first order.")
 
     TABLE(doc,
           ["Stage", "Holds", "Cost valuation", "Default Agile LT", "Default Push LT"],
@@ -229,13 +231,44 @@ def USER_GUIDE_BODY(doc):
           ],
           widths_cm=[2.7, 5.2, 2.6, 2.5, 2.5])
 
-    H2(doc, "Two stores, smart distribution")
+    H2(doc, "The store network and demand tiers")
     P(doc,
-        "Store A receives the demand share configured in the sidebar (default 60%); "
-        "Store B receives the remainder (default 40%). Initial store stock is always "
-        "split 50/50 — the planner has not yet reviewed when the simulation begins. "
-        "From the first planning review onward, smart distribution rebalances CW pushes "
-        "to equalize weeks-of-cover between stores before splitting by demand rate.")
+        "Stores are not identical. The network is split into three sell-rate tiers, "
+        "fixed for the whole run, with the high-selling minority carrying most of the "
+        "volume:")
+    TABLE(doc,
+          ["Tier", "Share of stores", "Sell-rate weight", "Share of total sales"],
+          [
+              ["High-selling", "10%", "4.0× average", "~40%"],
+              ["Medium",       "30%", "1.0× average", "~30%"],
+              ["Small",        "60%", "0.5× average", "~30%"],
+          ],
+          widths_cm=[3.2, 3.4, 3.4, 4.0])
+    P(doc,
+        "Stores are numbered in tier order: the high-selling stores first, then "
+        "medium, then small. This numbering is what the sales-matrix heatmap uses on "
+        "its vertical axis (high-selling at the top, small at the bottom).")
+
+    H2(doc, "Deterministic per-store demand")
+    P(doc,
+        "Per-store demand is deterministic — there is no random draw, so the same "
+        "inputs always produce the same week-by-week result. Each week the total "
+        "demand is split across the tiers in the fixed rate ratio "
+        "high-selling : medium : small = 15 : 6 : 1, scaled so the per-store numbers "
+        "sum to the week's total exactly. For example, with 6 stores (1 high, 2 medium, "
+        "3 small) and a total of 10/wk, the high store sells 5, each medium sells 2, "
+        "and the three small stores share the remaining 1 — rotating which small store "
+        "gets it week to week so each lands on its long-run average. Any rounding "
+        "remainder is given to the high-selling bucket first.")
+
+    H2(doc, "Smart distribution")
+    P(doc,
+        "Initial store stock is spread evenly across the network at week 0 — the "
+        "planner has not yet reviewed. From the first review onward, smart distribution "
+        "water-fills each CW push to equalize weeks-of-cover across stores, using each "
+        "store's learned sell rate, so the high-selling stores are replenished ahead of "
+        "the small ones. (The allocator distributes the integer rounding remainder by "
+        "largest fractional share, so no single store hoards the leftover units.)")
 
     PAGE_BREAK(doc)
 
@@ -259,16 +292,56 @@ def USER_GUIDE_BODY(doc):
         "of demand the system must hold to avoid stockouts between reviews. It drives "
         "both the recommended initial stock and the in-loop ordering rule.")
 
-    H2(doc, "The ordering rule (periodic review, single-echelon target)")
+    H2(doc, "Per-stage coverage (each push point has its own horizon)")
+    P(doc,
+        "The planner does not place a single order to the supplier. Each of the four "
+        "push points reviews its own position and places its own order, against a "
+        "coverage window that spans only the lead time DOWNSTREAM of that point plus "
+        "the order frequency. A unit released at a downstream stage needs less lead "
+        "time to reach a store, so it carries a shorter coverage target:")
+    TABLE(doc,
+          ["Push point", "Order target", "Coverage window (weeks)"],
+          [
+              ["Supplier (RM in)",  "od_sup",  "mat_lt + semi_lt + fp_lt + dist_lt + freq"],
+              ["Semi (RM → Semi)",  "od_semi", "semi_lt + fp_lt + dist_lt + freq"],
+              ["Finishing (Semi → FP)", "od_fp",   "fp_lt + dist_lt + freq"],
+              ["CW push (FP → store)",  "od_ship", "dist_lt + freq"],
+          ],
+          widths_cm=[3.8, 2.6, 7.2])
+
+    H2(doc, "The ordering rule (periodic review, multi-echelon targets)")
     CODE(doc,
         "if w in review_weeks:\n"
-        "    target   = forecast × coverage\n"
-        "    existing = stores + WIP + buffers + supplier_backlog\n"
-        "    order    = max(0, target − existing)")
+        "    for stage in [sup, semi, fp, ship]:\n"
+        "        target_x   = forecast × coverage_x        # demand to cover\n"
+        "        existing_x = (stores + every unit already AT or DOWNSTREAM\n"
+        "                      of this stage's push point) + this stage's backlog\n"
+        "        order_x    = max(0, target_x − existing_x)\n"
+        "        backlog_x += order_x                       # accrues to the stage")
     P(doc,
-        "On non-review weeks, the order is zero. The forecast updates only on review "
+        "Each stage's existing-count includes only inventory from that stage's push "
+        "point downstream, plus that stage's own outstanding backlog — so consecutive "
+        "reviews never double-count, and an upstream order does not suppress a "
+        "downstream one. The four orders accrue to four independent backlogs (supplier "
+        "pre-buffer, semi, fp, ship). Each processing or shipping step later in the "
+        "week consumes against its OWN backlog: RM→Semi draws down the semi backlog, "
+        "Semi→FP the fp backlog, and the CW→store push the ship backlog. This is what "
+        "‘advanced stage ordering' means — every stage pulls work forward on its own "
+        "shorter horizon instead of waiting for one chain-level order to propagate.")
+    P(doc,
+        "On non-review weeks, all orders are zero. The forecast updates only on review "
         "weeks (the planner re-bases on the latest observed demand). This intentionally "
         "models the periodic-review information lag that hurts Push more than Agile.")
+
+    H2(doc, "Per-store gap adjustment (smart distribution only)")
+    P(doc,
+        "Pooled stage targets answer ‘does the chain hold enough in aggregate?' but can "
+        "miss the case where some stores starve while others sit on surplus. When smart "
+        "distribution is on, each stage also computes a per-store gap: it works out the "
+        "cover-equalizing share of the common upstream pool that the CW push will "
+        "actually deliver, then sums each store's remaining shortfall. The final stage "
+        "order is the MAX of the pooled order and this per-store gap, so ordering and "
+        "execution use the same allocation logic.")
 
     H2(doc, "Capacity ramp")
     P(doc,
@@ -282,20 +355,57 @@ def USER_GUIDE_BODY(doc):
     # ─── Page 4: Forecasting and replenishment ──────────────────
     H1(doc, "3. Forecasting and Replenishment Logic")
 
-    H2(doc, "What the planner sees")
+    H2(doc, "What the planner sees (two forecast regimes)")
     P(doc,
-        "On each review week the planner observes the current week's actual demand and "
-        "treats it as the forward-looking forecast for ordering purposes. There is no "
-        "moving-average smoothing or exponential-smoothing layer — the simulator delib"
-        "erately uses the simplest possible signal so that the comparison between Agile "
-        "and Push isolates the structural effects of lead time and review frequency.")
+        "The simulator runs one of two forecast regimes depending on the demand "
+        "profile:")
+    BULLETS(doc, [
+        "Flat / Ramp / Drop (no seasonal curve): on each review week the planner "
+        "observes the current week's actual demand and treats it as the flat "
+        "forward-looking rate. Each stage target is simply forecast × coverage_x. "
+        "No smoothing layer — the simplest possible signal, so the comparison "
+        "isolates the structural effects of lead time and review frequency.",
+        "Seasonal: the planner holds a believed demand SHAPE (the planner curve) "
+        "but does not know its MAGNITUDE until the season starts. Targets are a "
+        "forward look-ahead over that curve, scaled by a factor discovered at the "
+        "first review (next subsection).",
+    ])
+
+    H2(doc, "Seasonal: actual sales guessed in the first review period")
+    P(doc,
+        "A seasonal planner knows the season is, say, ‘steep, peaking around week 6,' "
+        "but cannot know in advance whether this year sells at an average of 30, 100 "
+        "or 300 a week. The simulator models exactly this. The planner curve encodes "
+        "the believed shape, normalized to an average of 100/wk. On the FIRST review "
+        "week the planner compares cumulative actual demand so far against the "
+        "cumulative curve over the same weeks and locks a single scaling factor:")
+    CODE(doc,
+        "# locked once, at the first review week only\n"
+        "f = Σ actual_demand[1..w]  /  Σ planner_curve[1..w]")
+    P(doc,
+        "From then on, every stage target is a forward sum over the believed curve, "
+        "scaled by that discovered factor:")
+    CODE(doc,
+        "target_x = f × Σ planner_curve[w+1 .. w+coverage_x]   (capped at sim end)")
+    P(doc,
+        "So if the believed average was 100/wk but the first period sells through at "
+        "roughly 3×, the planner locks f ≈ 3.0 and scales its entire forward plan up "
+        "by 3× — it has ‘guessed' the season's magnitude from the opening weeks and "
+        "commits to it. The factor is snapped to a clean integer (or 0.1 increment) "
+        "when the observed ratio is within rounding-drift distance, because the "
+        "integer weekly demand the presets generate produces ratios that are nearly "
+        "but not exactly clean (e.g. an avg-300 curve against an avg-100 belief reads "
+        "as ~2.99 rather than 3.00). Snapping keeps the displayed factor readable "
+        "without changing behaviour. Once locked, the factor never re-bases — a wrong "
+        "first guess is carried for the rest of the season, which is the whole point: "
+        "long-cycle planners live with their opening-period read.")
 
     H2(doc, "What goes into the existing-stock count")
     P(doc,
         "When computing existing inventory for the order calculation, the simulator "
         "counts every unit in the system that has already been paid for or committed:")
     BULLETS(doc, [
-        "Stocks at both stores",
+        "Stocks at every store",
         "All units in transit (Material, Semi, Finishing, and Distribution pipes)",
         "Buffers between stages (RM, Semi, CW)",
         "Supplier backlog (orders placed but not yet shipped)",
@@ -303,6 +413,13 @@ def USER_GUIDE_BODY(doc):
     P(doc,
         "This means that as the supplier accumulates a backlog, the planner does NOT "
         "re-order the same units — they are already on the books.")
+    P(doc,
+        "The list above is the SUPPLIER stage's existing-count. Each downstream stage "
+        "uses a narrower slice: the Semi order ignores raw material and the Material "
+        "pipe (those cannot reach a store within its shorter coverage), the Finishing "
+        "order ignores everything upstream of the FP pipe, and the CW push counts only "
+        "store stock plus distribution pipes. Each stage also adds its own backlog, "
+        "never another stage's, so the four orders stay independent.")
 
     H2(doc, "Initial stock recommendation")
     P(doc,
@@ -311,13 +428,28 @@ def USER_GUIDE_BODY(doc):
         "matters most for ramps and seasonal profiles where the early weeks differ from "
         "the average.")
 
+    H2(doc, "Max total products (lifetime production cap)")
+    P(doc,
+        "The ‘Max total products (lifetime)' slider, directly under Initial Stock, sets "
+        "a cumulative production budget for the whole simulation. It counts the initial "
+        "stock (already in the chain at week 0) PLUS every unit the supplier ships "
+        "afterwards. Once that budget is exhausted, supplier orders are forced to zero "
+        "for the rest of the run — the chain lives on what it has already produced.")
+    P(doc,
+        "It is a lifetime total, not an instantaneous work-in-progress limit: a cap of "
+        "2 600 with 2 600 of initial stock means the supplier never produces anything "
+        "new. The slider cannot be set below the current initial stock, since the chain "
+        "already contains that much at week 0. Use it to study a capacity-constrained "
+        "season where total output is fixed and the only question is where to place it.")
+
     H2(doc, "Smart vs Push distribution")
     P(doc,
-        "Push 50/50 always allocates CW shipments equally between stores, ignoring the "
-        "demand split. Smart distribution, after the first review, computes weeks-of-"
-        "cover per store and prioritizes the worst-covered store before splitting the "
-        "remainder by demand rate. The first CW shipment is still 50/50 because the "
-        "planner has not yet reviewed.")
+        "Push always allocates CW shipments in fixed tier-proportional shares, ignoring "
+        "each store's current stock. Smart distribution, after the first review, "
+        "water-fills to equalize weeks-of-cover across stores — prioritizing the "
+        "worst-covered (typically a high-selling store that has burned through its "
+        "stock) before splitting the remainder by learned sell rate. The first CW push "
+        "is still even because the planner has not yet reviewed.")
 
     PAGE_BREAK(doc)
 
@@ -509,9 +641,9 @@ def USER_GUIDE_BODY(doc):
         "CW (the central warehouse) holds finished goods and pushes them downstream "
         "every week regardless of order activity. The reasoning: CW-to-store is internal "
         "logistics, not procurement — once goods are finished, the firm allocates them "
-        "to wherever they sell. The first CW shipment always splits 50/50 between "
-        "stores; from the first review onward, smart distribution prioritizes the worst-"
-        "covered store.")
+        "to wherever they sell. The first CW shipment is spread evenly across the "
+        "network; from the first review onward, smart distribution prioritizes the "
+        "worst-covered stores (typically the high-selling tier).")
 
     H2(doc, "What you will observe in the diagram")
     BULLETS(doc, [
@@ -566,30 +698,53 @@ def USER_GUIDE_BODY(doc):
     H2(doc, "WIP labels")
     P(doc,
         "Below each stage band, a WIP label sums all units currently in that stage's "
-        "pipe + its buffer. Distribution shows two lines — WIP A and WIP B — because "
-        "each store has its own dedicated pipe.")
+        "pipe + its buffer. Distribution aggregates the per-store pipes into a single "
+        "in-transit total across the network.")
+
+    H2(doc, "Sales matrix (per-store heatmap)")
+    P(doc,
+        "Below the diagram, the sales matrix shows every store as a row and every week "
+        "as a column. All stores are displayed (row height shrinks as the network "
+        "grows). Rows are ordered top-to-bottom from high-selling to small, so the "
+        "tier bands are visible at a glance. Each cell is colored by that store's state "
+        "for the week:")
+    TABLE(doc,
+          ["State", "Meaning"],
+          [
+              ["Sold (green)",  "Store had stock and met demand."],
+              ["Missed (red)",  "Demand hit but the store was empty."],
+              ["Held (yellow)", "Store holds stock but had no demand this week."],
+              ["Idle (grey)",   "Store is empty AND had no demand. Note: this is a "
+                                "per-store state — stock can still sit in CW or upstream "
+                                "stages without showing here."],
+          ],
+          widths_cm=[3.4, 11.6])
+    P(doc,
+        "Reading the bands together tells the distribution story: a red high-selling "
+        "band with yellow small-store rows means stock is stranded at low-demand stores "
+        "while the volume drivers starve — the classic failure mode that smart "
+        "distribution exists to prevent.")
 
     PAGE_BREAK(doc)
 
     # ─── Page 11: KPIs and the P&L ──────────────────────────────
     H1(doc, "9. KPIs and the P&L")
 
-    H2(doc, "The seven KPI cards")
+    H2(doc, "The six KPI cards")
     P(doc,
-        "Above the diagram, seven cards summarize cumulative results from W1 to the "
+        "Above the diagram, six cards summarize cumulative results from W1 to the "
         "current week. They update as you navigate the timeline.")
     TABLE(doc,
           ["KPI", "Meaning", "Color logic"],
           [
-              ["Service Level",  "Sales ÷ demand",                       "Red <60%, Amber <85%, Green ≥85%"],
-              ["Cumul. Sales",   "Total units sold so far",              "Blue"],
-              ["Missed Total",   "Units of demand not fulfilled",        "Red"],
-              ["Missed A",       "Per-store missed sales (Store A)",     "Red"],
-              ["Missed B",       "Per-store missed sales (Store B)",     "Purple"],
-              ["Stockout Wks",   "Weeks with at least one missed unit",  "Green if 0, else red"],
-              ["Useful Prod.",   "Sold ÷ (sold + remaining stock+pipe)", "Red <50%, Amber <80%, Green ≥80%"],
+              ["Service Level",        "Sales ÷ demand",                        "Red <60%, Amber <85%, Green ≥85%"],
+              ["Cumul. Sales",         "Total units sold so far",               "Blue"],
+              ["Missed Total",         "Units of demand not fulfilled",         "Red"],
+              ["Store-Stockout Events","Count of store×week cells that missed",  "Green if 0, else red"],
+              ["Stockout Wks",         "Weeks with at least one missed unit",   "Green if 0, else red"],
+              ["Useful Prod.",         "Sold ÷ (sold + remaining stock+pipe)",  "Red <50%, Amber <80%, Green ≥80%"],
           ],
-          widths_cm=[3.0, 7.5, 4.5])
+          widths_cm=[3.6, 7.0, 4.4])
 
     H2(doc, "P&L summary expander")
     P(doc,
@@ -821,6 +976,53 @@ def DEV_GUIDE_BODY(doc):
         "STOCK_DIST_OPERATIONAL, STOCK_DIST_SEASONAL — % allocation per profile.",
         "SEASONAL_BASE_STOCK, SELL_THROUGH_SEASONAL — seasonal sizing rule.",
         "SEASONAL_PARAMS — gamma curve shape (peak position, k).",
+        "TIER_SHARE — fraction of stores per tier (high 0.10 / medium 0.30 / small 0.60).",
+        "TIER_WEIGHTS — sell-rate weight per tier (high 4.0 / medium 1.0 / small 0.5).",
+    ])
+
+    H3(doc, "Inside the weekly loop — multi-echelon ordering")
+    P(doc,
+        "run_simulation orders at four push points every review week, each with its "
+        "own coverage horizon. Search these variables in the engine:")
+    TABLE(doc,
+          ["Variable", "Meaning"],
+          [
+              ["cov_sup / cov_semi / cov_fp / cov_ship", "Per-stage coverage windows (downstream LT + freq)."],
+              ["existing_sup / _semi / _fp / _ship",     "Inventory counted from each push point downstream + that stage's backlog."],
+              ["tgt_sup / _semi / _fp / _ship",          "Demand-to-cover target for each stage."],
+              ["od_sup / od_semi / od_fp / od_ship",     "max(0, target − existing) — the order accrued to each stage's backlog."],
+              ["pb / semi_backlog / fp_backlog / ship_backlog", "The four independent backlogs each step draws against."],
+          ],
+          widths_cm=[5.6, 9.4])
+    P(doc,
+        "To change a stage's horizon, edit its cov_* expression. To make a stage order "
+        "more or less aggressively, edit its existing_* set. The per-store gap block "
+        "(guarded by smart_distrib) raises a stage's order when stores would starve.")
+
+    H3(doc, "Inside the weekly loop — seasonal factor discovery")
+    P(doc,
+        "When a planner_curve is passed in (seasonal_mode), the engine locks a single "
+        "scaling factor at the first review week, then look-aheads over the curve:")
+    BULLETS(doc, [
+        "planner_curve_internal — the believed shape (avg ≈ 100/wk), index 0 unused.",
+        "planner_factor — locked once: Σ actual_demand[1..w] / Σ curve[1..w], then "
+        "snapped to a clean integer or 0.1 increment within rounding tolerance.",
+        "_lookahead_sum(curve, w_from, w_to) — forward sum of the curve over a stage's "
+        "coverage window × planner_factor. Produces tgt_* in seasonal mode (the flat "
+        "path uses ff × cov_x). The factor never re-bases after the first review.",
+    ])
+
+    H3(doc, "Deterministic per-store demand and the production cap")
+    BULLETS(doc, [
+        "_bucket_counts(n_stores) — how many stores fall in each tier.",
+        "_deterministic_per_store_demand(week, dem_total, n_high, n_medium, n_small) — "
+        "splits the week's total by the 15:6:1 rate ratio, summing to dem_total exactly; "
+        "remainder to the high-selling bucket, medium/small remainders rotate by week.",
+        "prod_cap + cum_produced — the lifetime production budget. cum_produced starts "
+        "at the initial stock; each supplier order is clamped to the remaining headroom "
+        "and added in. When headroom hits 0, od_sup is forced to 0 for the rest of the run.",
+        "_smart_alloc_n(...) — the CW→store water-fill; distributes the integer rounding "
+        "remainder by largest fractional share (Hamilton) so no store hoards leftovers.",
     ])
 
     PAGE_BREAK(doc)
