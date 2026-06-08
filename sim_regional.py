@@ -180,24 +180,37 @@ def run_simulation_regional(
     if N_REG == 0:
         N_REG = 1
 
-    # Per-store tier rates (weights) — used for region-internal init split
-    tier_weight = (
-        [15.0] * n_h + [6.0] * n_m + [1.0] * n_s
-    )
-    tier_weight = np.array(tier_weight, dtype=float)
-    tw_sum = float(tier_weight.sum()) or 1.0
-
     # ── Initial stocks ──
     rw_a = int(round(init_rw_total * region_split_a))
     rw_b = int(init_rw_total - rw_a)
 
     store_a_total = int(round(init_store_total * region_split_a))
     store_b_total = int(init_store_total - store_a_total)
-    # Within each region, distribute by tier weight (largest-remainder)
-    def _split_by_weight(total: int) -> np.ndarray:
+
+    # Within each region, distribute init stock by EXPECTED PER-STORE
+    # weekly demand averaged over a full rotation cycle, not by uniform
+    # tier weight. This fixes the artifact where stores at the front of
+    # a tier (which always get the +1 from integer rounding in the
+    # deterministic high-tier rule) systematically missed sales because
+    # every same-tier store started with identical init.
+    #
+    # Averaging over `weeks` weeks captures the medium/small rotation
+    # AND the permanent high-tier "first N always +1" bias, so each
+    # store's init reflects its real expected demand over the run.
+    base_dem_a = max(1, int(round(base_forecast * region_split_a)))
+    base_dem_b = max(1, int(round(base_forecast * region_split_b)))
+    expected_per_store_a = np.zeros(N_REG, dtype=float)
+    expected_per_store_b = np.zeros(N_REG, dtype=float)
+    for _w in range(1, max(2, weeks + 1)):
+        expected_per_store_a += _deterministic_demand(_w, base_dem_a, n_h, n_m, n_s).astype(float)
+        expected_per_store_b += _deterministic_demand(_w, base_dem_b, n_h, n_m, n_s).astype(float)
+    expected_per_store_a = np.maximum(expected_per_store_a, 1e-3)
+    expected_per_store_b = np.maximum(expected_per_store_b, 1e-3)
+
+    def _split_by_expected(total: int, expected: np.ndarray) -> np.ndarray:
         if N_REG == 0 or total == 0:
             return np.zeros(N_REG, dtype=int)
-        raw = total * tier_weight / tw_sum
+        raw = total * expected / expected.sum()
         floors = np.floor(raw).astype(int)
         rem = total - int(floors.sum())
         if rem > 0:
@@ -205,8 +218,8 @@ def run_simulation_regional(
             floors[order[:rem]] += 1
         return floors
 
-    stores_a = _split_by_weight(store_a_total)
-    stores_b = _split_by_weight(store_b_total)
+    stores_a = _split_by_expected(store_a_total, expected_per_store_a)
+    stores_b = _split_by_expected(store_b_total, expected_per_store_b)
 
     # ── Pipes ──
     mat_pipe   = [0.0] * max(1, mat_lt)
