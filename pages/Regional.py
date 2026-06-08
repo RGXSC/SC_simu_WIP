@@ -1,0 +1,409 @@
+"""Regional 2-RW supply chain — interactive page.
+
+Drop-in alongside the main app. Streamlit auto-discovers any .py file
+in pages/ and adds it to the left-rail navigation.
+
+UI surface for the sim_regional.run_simulation_regional engine:
+  - Region split slider (10..90, step 10)
+  - 5 stage LTs (incl. new CW->RW)
+  - Initial stock split: Material / Semi / CW / RW / Stores
+  - 9 quick-preset buttons (3 splits x 3 distributions)
+  - Aggregate KPI row + per-region row (Service A|B, Sales A|B, Missed A|B, Stockout A|B)
+  - 9-cell grid summary (runs the spec grid in-page and shows margins)
+"""
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+import streamlit as st
+import pandas as pd
+import altair as alt
+import sim_regional as sim
+
+st.set_page_config(layout="wide", page_title="Regional 2-RW Simulator", page_icon="\U0001F30D")
+st.title("\U0001F30D  Regional 2-RW Simulator")
+st.caption("Chain: Supplier → Material → Semi → FP → **CW → RW A / RW B → Stores**. "
+           "Planner discovers the regional demand split at the first review.")
+
+with st.expander("ℹ️ Why does sell-through cluster so tightly across the 9 cells?", expanded=False):
+    st.markdown("""
+**Sell-through = sales ÷ produced.** Both numbers move together in every cell:
+
+- **Produced is almost identical across cells.** The planner's target is
+  `forecast × coverage` (≈ 100 × 14 = 1,400 units at every stage), and total
+  initial inventory equals that target. So weekly supplier orders just track
+  weekly demand (~100/wk) — **regardless of where the 1,400 sits at W0**.
+- **Sales are very similar too.** 99% service is 99% service: the spread
+  between best and worst is only ~30 missed-unit difference out of 2,600 demand.
+
+So 30/30/40's *better allocation* (catching Region B starvation at first
+review) reduces missed sales by tens of units — visible in **service** and
+**margin** (€175 spread), but invisible in sell-through (0.4 pp spread).
+
+**To make distribution choices actually move sell-through:**
+
+1. **Enforce a lifetime production cap** (`prod_cap` ≈ slightly above demand).
+   The chain can't over-buffer, so wasted units in the wrong region directly
+   cost a sale → sell-through drops in the bad cells and rises in the good
+   ones.
+2. **Reduce initial stock below LT+1.** Same effect: the chain is starved,
+   so the right placement at W0 matters far more than the planner's later
+   corrections.
+3. **Use seasonal demand.** The planner ALSO gets the magnitude wrong, so
+   over-production happens in some cells and not others.
+
+Toggle the production cap in the sidebar and re-run the 9-cell grid to see
+the spread open up.
+    """)
+
+# ── Defaults (session_state persistence) ─────────────────────────────────
+def _set(k, v):
+    if k not in st.session_state: st.session_state[k] = v
+
+_set("reg_split", 50)
+_set("reg_weeks", 26)
+_set("reg_n_per_region", 50)
+_set("reg_demand_per_wk", 100)
+_set("reg_mat_lt", 4)
+_set("reg_semi_lt", 2)
+_set("reg_fp_lt", 1)
+_set("reg_cw_rw_lt", 1)
+_set("reg_rw_store_lt", 1)
+_set("reg_order_freq", 1)
+_set("reg_total_init", 800)
+_set("reg_dist_mat", 0)
+_set("reg_dist_semi", 0)
+_set("reg_dist_cw", 0)
+_set("reg_dist_rw", 0)
+_set("reg_dist_store", 100)
+_set("reg_prod_cap_on", False)
+_set("reg_prod_cap", 800)
+_set("reg_smart_distrib", True)
+_set("reg_price", 10.0)
+_set("reg_var_cost", 5.0)
+_set("reg_fixed_pct", 20)
+
+# ── Sidebar ──────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("### ⚙️ Simulation")
+    st.session_state.reg_weeks         = st.slider("Weeks", 4, 52, st.session_state.reg_weeks, key="w_reg_weeks")
+    st.session_state.reg_n_per_region  = st.slider("Stores per region (N)", 10, 250, st.session_state.reg_n_per_region, step=10, key="w_reg_n")
+    st.session_state.reg_demand_per_wk = st.slider("Flat demand (pcs/wk)", 0, 500, st.session_state.reg_demand_per_wk, step=10, key="w_reg_dem")
+
+    st.markdown("### \U0001F4CD Region split")
+    st.session_state.reg_split = st.slider(
+        "% to Region A", 10, 90,
+        st.session_state.reg_split, step=10, key="w_reg_split",
+        help="Ground-truth demand share for Region A. The planner discovers this at the first review.",
+    )
+    st.caption(f"**A = {st.session_state.reg_split}%  ·  B = {100 - st.session_state.reg_split}%**")
+
+    st.markdown("### \U0001F4E6 Lead times (weeks)")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.session_state.reg_mat_lt    = st.number_input("Material",  1, 20, st.session_state.reg_mat_lt,  1, key="w_reg_mat")
+        st.session_state.reg_fp_lt     = st.number_input("FP prod.",  1, 20, st.session_state.reg_fp_lt,   1, key="w_reg_fp")
+        st.session_state.reg_rw_store_lt = st.number_input("RW→Store", 1, 20, st.session_state.reg_rw_store_lt, 1, key="w_reg_rwst")
+    with c2:
+        st.session_state.reg_semi_lt   = st.number_input("Semi",      1, 20, st.session_state.reg_semi_lt, 1, key="w_reg_semi")
+        st.session_state.reg_cw_rw_lt  = st.number_input("CW→RW",     1, 20, st.session_state.reg_cw_rw_lt, 1, key="w_reg_cwrw")
+        st.session_state.reg_order_freq = st.number_input("Order freq", 1, 8, st.session_state.reg_order_freq, 1, key="w_reg_freq")
+
+    total_lt = (st.session_state.reg_mat_lt + st.session_state.reg_semi_lt + st.session_state.reg_fp_lt
+                + st.session_state.reg_cw_rw_lt + st.session_state.reg_rw_store_lt)
+    cov_sup  = total_lt + st.session_state.reg_order_freq
+    st.caption(f"Total LT **{total_lt} wk**  ·  Supplier coverage **{cov_sup} wk**")
+
+    st.markdown("### \U0001F4E6 Initial stock")
+    st.session_state.reg_total_init = st.slider(
+        "Total initial stock (pcs)", 0, 10000, st.session_state.reg_total_init, step=50, key="w_reg_init",
+    )
+    rec = cov_sup * st.session_state.reg_demand_per_wk
+    st.caption(f"_Recommended ≈ coverage × demand = **{rec}** pcs._")
+
+    st.caption("Distribution (% of total, must sum to 100):")
+    c1, c2, c3 = st.columns(3)
+    with c1: st.session_state.reg_dist_mat   = st.number_input("Material %", 0, 100, st.session_state.reg_dist_mat,   5, key="w_reg_dmat")
+    with c2: st.session_state.reg_dist_semi  = st.number_input("Semi %",     0, 100, st.session_state.reg_dist_semi,  5, key="w_reg_dsemi")
+    with c3: st.session_state.reg_dist_cw    = st.number_input("CW %",       0, 100, st.session_state.reg_dist_cw,    5, key="w_reg_dcw")
+    c1, c2 = st.columns(2)
+    with c1: st.session_state.reg_dist_rw    = st.number_input("RW total %", 0, 100, st.session_state.reg_dist_rw,    5, key="w_reg_drw",
+                                                              help="Split A/B by region-split slider.")
+    with c2: st.session_state.reg_dist_store = st.number_input("Stores %",   0, 100, st.session_state.reg_dist_store, 5, key="w_reg_dst",
+                                                              help="Split A/B by region-split slider; within region by tier.")
+    dist_sum = (st.session_state.reg_dist_mat + st.session_state.reg_dist_semi
+                + st.session_state.reg_dist_cw + st.session_state.reg_dist_rw
+                + st.session_state.reg_dist_store)
+    if dist_sum != 100:
+        st.warning(f"⚠️ Distribution sums to {dist_sum}% (should be 100%). Engine will normalize.")
+
+    st.markdown("### \U0001F3ED Production cap")
+    st.session_state.reg_prod_cap_on = st.toggle("Enforce lifetime cap", value=st.session_state.reg_prod_cap_on, key="w_reg_cap_on")
+    if st.session_state.reg_prod_cap_on:
+        st.session_state.reg_prod_cap = st.slider("Max total products (lifetime)",
+            max(10, st.session_state.reg_total_init), 20000,
+            max(st.session_state.reg_prod_cap, st.session_state.reg_total_init),
+            step=50, key="w_reg_cap")
+        st.caption(f"_Initial stock counts; supplier orders forced to 0 once headroom = 0._")
+
+    st.markdown("### ⚖️ Policy")
+    st.session_state.reg_smart_distrib = st.toggle("Smart distribution", value=st.session_state.reg_smart_distrib, key="w_reg_smart")
+
+    st.markdown("### \U0001F4B0 Finance")
+    c1, c2 = st.columns(2)
+    with c1: st.session_state.reg_price    = st.number_input("Price (€/u)",    0.0, 1000.0, st.session_state.reg_price,    0.5, key="w_reg_price")
+    with c2: st.session_state.reg_var_cost = st.number_input("Var cost (€/u)", 0.0, 1000.0, st.session_state.reg_var_cost, 0.5, key="w_reg_vc")
+    st.session_state.reg_fixed_pct = st.slider("Fixed cost (% of base rev)", 0, 50, st.session_state.reg_fixed_pct, 1, key="w_reg_fix")
+
+# ── Preset buttons (9 cells = 3 splits × 3 stock distributions) ────────────
+st.markdown("### Quick presets")
+st.caption("Each preset writes the sidebar sliders. Result panel updates automatically. "
+           "Common base: Agile LTs (mat=semi=fp=cw→rw=rw→store=1), Flat 100/wk × current weeks, init = LT+1.")
+
+REG_SPLITS = [50, 70, 90]
+STOCK_DISTS = [
+    ("0/0/100", 0, 0, 100),
+    ("0/30/70", 0, 30, 70),
+    ("30/30/40", 30, 30, 40),
+]
+
+def _apply_preset(split_pct, cw_pct, rw_pct, store_pct):
+    st.session_state.reg_split = split_pct
+    st.session_state.reg_mat_lt = 1
+    st.session_state.reg_semi_lt = 1
+    st.session_state.reg_fp_lt = 1
+    st.session_state.reg_cw_rw_lt = 1
+    st.session_state.reg_rw_store_lt = 1
+    st.session_state.reg_order_freq = 1
+    st.session_state.reg_demand_per_wk = 100
+    total_lt = 5
+    st.session_state.reg_total_init = (total_lt + 1) * 100
+    st.session_state.reg_dist_mat = 0
+    st.session_state.reg_dist_semi = 0
+    st.session_state.reg_dist_cw = cw_pct
+    st.session_state.reg_dist_rw = rw_pct
+    st.session_state.reg_dist_store = store_pct
+    st.session_state.reg_prod_cap_on = False
+    st.session_state.reg_smart_distrib = True
+
+cols = st.columns(9)
+for i, sp in enumerate(REG_SPLITS):
+    for j, (lbl, cwp, rwp, stp) in enumerate(STOCK_DISTS):
+        idx = i * 3 + j
+        with cols[idx]:
+            if st.button(f"{sp}/{100-sp}\n{lbl}", key=f"pre_{sp}_{lbl}", use_container_width=True):
+                _apply_preset(sp, cwp, rwp, stp)
+                st.rerun()
+
+# ── Run the simulation ──────────────────────────────────────────────────────
+def _normalize_dist():
+    """Return ints summing to 100 (largest-remainder)."""
+    parts = {
+        'mat':   st.session_state.reg_dist_mat,
+        'semi':  st.session_state.reg_dist_semi,
+        'cw':    st.session_state.reg_dist_cw,
+        'rw':    st.session_state.reg_dist_rw,
+        'store': st.session_state.reg_dist_store,
+    }
+    tot = sum(parts.values())
+    if tot == 0:
+        return {**parts, 'store': 100}
+    # Scale to 100 — just use values as % directly
+    return parts
+
+dist = _normalize_dist()
+T = st.session_state.reg_total_init
+init_mat   = int(round(T * dist['mat']   / 100))
+init_semi  = int(round(T * dist['semi']  / 100))
+init_cw    = int(round(T * dist['cw']    / 100))
+init_rw    = int(round(T * dist['rw']    / 100))
+init_store = T - init_mat - init_semi - init_cw - init_rw
+
+demand_curve = [st.session_state.reg_demand_per_wk] * st.session_state.reg_weeks
+
+r = sim.run_simulation_regional(
+    weeks=st.session_state.reg_weeks,
+    n_per_region=st.session_state.reg_n_per_region,
+    demand_curve=demand_curve,
+    region_split_pct=st.session_state.reg_split,
+    mat_lt=st.session_state.reg_mat_lt,
+    semi_lt=st.session_state.reg_semi_lt,
+    fp_lt=st.session_state.reg_fp_lt,
+    cw_rw_lt=st.session_state.reg_cw_rw_lt,
+    rw_store_lt=st.session_state.reg_rw_store_lt,
+    order_freq=st.session_state.reg_order_freq,
+    init_rawmat=init_mat, init_semi=init_semi,
+    init_cw=init_cw, init_rw_total=init_rw, init_store_total=init_store,
+    cap_start=1000, cap_ramp=0.0,
+    smart_distrib=st.session_state.reg_smart_distrib,
+    prod_cap=st.session_state.reg_prod_cap if st.session_state.reg_prod_cap_on else None,
+    var_cost=st.session_state.reg_var_cost,
+    price=st.session_state.reg_price,
+    fixed_pct=st.session_state.reg_fixed_pct / 100.0,
+    base_forecast=st.session_state.reg_demand_per_wk or 100,
+)
+
+# ── KPI rows ──────────────────────────────────────────────────────────────
+def _kpi(label, value, color="#1a2a40", sub=None):
+    sub_html = f'<div style="color:#5a6a80;font-size:10.5px;margin-top:2px;">{sub}</div>' if sub else ""
+    return (
+        f'<div style="background:#fff;border-radius:8px;padding:10px 14px;'
+        f'box-shadow:0 1px 2px rgba(0,0,0,.05);height:100%;">'
+        f'<div style="color:#5a6a80;font-size:10.5px;text-transform:uppercase;letter-spacing:.4px;font-weight:600;">{label}</div>'
+        f'<div style="color:{color};font-size:22px;font-weight:700;margin-top:4px;">{value}</div>'
+        f'{sub_html}</div>'
+    )
+
+def _svc_color(p):
+    return "#1a8a4a" if p >= 0.95 else "#e67e22" if p >= 0.80 else "#c0392b"
+
+# Aggregate row
+st.markdown("### \U0001F4CA Aggregate KPIs")
+ks = st.columns(6)
+ks[0].markdown(_kpi("Service Level", f"{r['svc']*100:.1f}%", _svc_color(r['svc'])), unsafe_allow_html=True)
+ks[1].markdown(_kpi("Sales (units)", f"{r['tot_sales']:,}"), unsafe_allow_html=True)
+ks[2].markdown(_kpi("Produced", f"{r['tot_produced']:,}"), unsafe_allow_html=True)
+ks[3].markdown(_kpi("Sell-through", f"{r['sell_through']*100:.1f}%",
+                    "#1a8a4a" if r['sell_through']>=0.80 else "#c0392b"), unsafe_allow_html=True)
+ks[4].markdown(_kpi("Missed", f"{r['tot_missed']:,}", "#c0392b"), unsafe_allow_html=True)
+margin_color = "#1a8a4a" if r['margin'] >= 0 else "#c0392b"
+ks[5].markdown(_kpi("Margin (€)", f"{r['margin']:+,.0f}", margin_color,
+                    sub=f"{r['margin_pct_rev']*100:+.1f}% of revenue"), unsafe_allow_html=True)
+
+# Per-region row
+st.markdown("### \U0001F30D Per-region")
+# Compute per-region missed + stockout-weeks
+states = r['states'][1:]
+missed_a = sum(s['missed_a'] for s in states)
+missed_b = sum(s['missed_b'] for s in states)
+sw_a = sum(1 for s in states if s['missed_a'] > 0)
+sw_b = sum(1 for s in states if s['missed_b'] > 0)
+
+ks = st.columns(4)
+ks[0].markdown(_kpi("Service A | B",
+    f"{r['svc_a']*100:.1f}% | {r['svc_b']*100:.1f}%",
+    _svc_color(min(r['svc_a'], r['svc_b']))), unsafe_allow_html=True)
+ks[1].markdown(_kpi("Sales A | B",
+    f"{r['sales_a']:,} | {r['sales_b']:,}"), unsafe_allow_html=True)
+ks[2].markdown(_kpi("Missed A | B",
+    f"{missed_a:,} | {missed_b:,}", "#c0392b"), unsafe_allow_html=True)
+ks[3].markdown(_kpi("Stockout wks A | B",
+    f"{sw_a}/{st.session_state.reg_weeks} | {sw_b}/{st.session_state.reg_weeks}",
+    "#1a8a4a" if (sw_a + sw_b) == 0 else "#c0392b"), unsafe_allow_html=True)
+
+if r['share_a_locked'] is not None:
+    st.caption(f"_Planner locked share_A = **{r['share_a_locked']*100:.0f}%** at first review._ "
+               f"(Ground truth: {st.session_state.reg_split}%)")
+
+# ── Weekly chart: aggregate demand vs sales ────────────────────────────────
+st.markdown("### \U0001F4C8 Weekly demand vs sales (aggregate)")
+chart_data = pd.DataFrame({
+    'Week': list(range(1, st.session_state.reg_weeks + 1)),
+    'Demand': [s['demand_a'] + s['demand_b'] for s in states],
+    'Sales':  [s['sales_a']  + s['sales_b']  for s in states],
+    'Missed': [s['missed_a'] + s['missed_b'] for s in states],
+})
+long = chart_data.melt('Week', ['Demand', 'Sales', 'Missed'], var_name='Series', value_name='Units')
+ch = alt.Chart(long).mark_line(point=True).encode(
+    x='Week:O', y='Units:Q',
+    color=alt.Color('Series:N', scale=alt.Scale(domain=['Demand','Sales','Missed'], range=['#1a2a40','#1a8a4a','#c0392b']))
+).properties(height=280)
+st.altair_chart(ch, use_container_width=True)
+
+# ── Per-region weekly sales ────────────────────────────────────────────────
+st.markdown("### \U0001F4C8 Weekly sales per region")
+region_data = pd.DataFrame({
+    'Week':   list(range(1, st.session_state.reg_weeks + 1)) * 2,
+    'Region': ['A'] * st.session_state.reg_weeks + ['B'] * st.session_state.reg_weeks,
+    'Sales':  [s['sales_a'] for s in states] + [s['sales_b'] for s in states],
+    'Missed': [s['missed_a'] for s in states] + [s['missed_b'] for s in states],
+})
+ch2 = alt.Chart(region_data).mark_bar().encode(
+    x='Week:O',
+    y='Sales:Q',
+    color=alt.Color('Region:N', scale=alt.Scale(domain=['A','B'], range=['#2c5f8a','#c97a2c']))
+).properties(height=220)
+st.altair_chart(ch2, use_container_width=True)
+
+# ── Chain inventory chart ──────────────────────────────────────────────────
+st.markdown("### \U0001F4E6 End-of-week stock by location")
+inv_data = pd.DataFrame({
+    'Week':  list(range(0, st.session_state.reg_weeks + 1)),
+    'CW':    [s['cw']   for s in r['states']],
+    'RW A':  [s['rw_a'] for s in r['states']],
+    'RW B':  [s['rw_b'] for s in r['states']],
+    'Stores A': [sum(s['stores_a']) for s in r['states']],
+    'Stores B': [sum(s['stores_b']) for s in r['states']],
+})
+inv_long = inv_data.melt('Week', ['CW', 'RW A', 'RW B', 'Stores A', 'Stores B'], var_name='Where', value_name='Units')
+ch3 = alt.Chart(inv_long).mark_area(opacity=0.7).encode(
+    x='Week:O', y=alt.Y('Units:Q', stack='zero'),
+    color=alt.Color('Where:N', scale=alt.Scale(
+        domain=['CW','RW A','RW B','Stores A','Stores B'],
+        range=['#1a2a40','#2c5f8a','#c97a2c','#5a8fc0','#e0a878']
+    ))
+).properties(height=260)
+st.altair_chart(ch3, use_container_width=True)
+
+# ── 9-cell summary (re-runs the grid in-page) ──────────────────────────────
+with st.expander("\U0001F4CA Run the 9-cell grid (current LT + demand)", expanded=False):
+    st.caption("Replays the current sidebar config across the 3 region splits × 3 stock distributions. "
+               "Useful for sanity-checking the spread.")
+    if st.button("Run 9-cell grid", key="run_grid"):
+        rows = []
+        for sp in REG_SPLITS:
+            for lbl, cwp, rwp, stp in STOCK_DISTS:
+                T = st.session_state.reg_total_init
+                rg = sim.run_simulation_regional(
+                    weeks=st.session_state.reg_weeks,
+                    n_per_region=st.session_state.reg_n_per_region,
+                    demand_curve=demand_curve,
+                    region_split_pct=sp,
+                    mat_lt=st.session_state.reg_mat_lt,
+                    semi_lt=st.session_state.reg_semi_lt,
+                    fp_lt=st.session_state.reg_fp_lt,
+                    cw_rw_lt=st.session_state.reg_cw_rw_lt,
+                    rw_store_lt=st.session_state.reg_rw_store_lt,
+                    order_freq=st.session_state.reg_order_freq,
+                    init_rawmat=0, init_semi=0,
+                    init_cw=int(T * cwp / 100),
+                    init_rw_total=int(T * rwp / 100),
+                    init_store_total=T - int(T * cwp / 100) - int(T * rwp / 100),
+                    cap_start=1000, cap_ramp=0.0,
+                    smart_distrib=st.session_state.reg_smart_distrib,
+                    prod_cap=st.session_state.reg_prod_cap if st.session_state.reg_prod_cap_on else None,
+                    var_cost=st.session_state.reg_var_cost,
+                    price=st.session_state.reg_price,
+                    fixed_pct=st.session_state.reg_fixed_pct / 100.0,
+                    base_forecast=st.session_state.reg_demand_per_wk or 100,
+                )
+                rows.append({
+                    'Split': f"{sp}/{100-sp}",
+                    'Distribution': lbl,
+                    'Service': f"{rg['svc']*100:.1f}%",
+                    'Svc A': f"{rg['svc_a']*100:.1f}%",
+                    'Svc B': f"{rg['svc_b']*100:.1f}%",
+                    'Sales': f"{rg['tot_sales']:,}",
+                    'Produced': f"{rg['tot_produced']:,}",
+                    'Sell-thru': f"{rg['sell_through']*100:.1f}%",
+                    'Margin (€)': f"{rg['margin']:+,.0f}",
+                    'Margin %': f"{rg['margin_pct_rev']*100:+.1f}%",
+                })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+# ── Per-week detail table ──────────────────────────────────────────────────
+with st.expander("\U0001F50E Per-week detail (current scenario)"):
+    rows = []
+    for i, s in enumerate(r['states']):
+        rows.append({
+            'W': s['week'],
+            'CW': int(s['cw']),
+            'RW A': int(s['rw_a']),
+            'RW B': int(s['rw_b']),
+            'Stores A': sum(s['stores_a']),
+            'Stores B': sum(s['stores_b']),
+            'Sales A': s['sales_a'],
+            'Sales B': s['sales_b'],
+            'Missed A': s['missed_a'],
+            'Missed B': s['missed_b'],
+            'Sup. order': s['sup_order'],
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
