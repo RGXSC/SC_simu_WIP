@@ -142,6 +142,7 @@ def run_simulation_regional(
     prod_cap: int | None = None,
     var_cost: float = 5.0, price: float = 10.0, fixed_pct: float = 0.20,
     base_forecast: int = 100,
+    planner_curve: list[float] | None = None,
 ) -> dict:
     """Run a 2-RW simulation. Returns a summary dict + per-week states.
 
@@ -149,7 +150,27 @@ def run_simulation_regional(
       - init_rw_total split between RW_A and RW_B by region_split_pct (ground truth)
       - init_store_total split between regions by region_split_pct, then
         within each region weighted by per-tier rate (high stores get more)
+
+    Seasonal mode: pass planner_curve (length weeks+1, index 0 unused;
+    or length weeks, prepended with 0). The planner BELIEVES this shape
+    normalized to avg ≈ base_forecast. At the FIRST review week, it locks
+    one scaling factor f_seasonal = Σ actual_demand[1..w] / Σ curve[1..w]
+    independently of share_A. From then on every stage target is
+    f_seasonal × Σ planner_curve[w+1..w+coverage_x] (capped at sim end).
     """
+    seasonal_mode = planner_curve is not None
+    if seasonal_mode:
+        pc = [0.0] * (weeks + 2)
+        if len(planner_curve) == weeks:
+            for i in range(weeks):
+                pc[i + 1] = float(planner_curve[i])
+        else:
+            for i in range(min(len(planner_curve), weeks + 1)):
+                pc[i] = float(planner_curve[i])
+        planner_curve_internal = pc
+    else:
+        planner_curve_internal = None
+    f_seasonal = None  # locked at first review
     # ── Setup ──
     region_split_a = max(0.10, min(0.90, region_split_pct / 100.0))
     region_split_b = 1.0 - region_split_a
@@ -285,15 +306,42 @@ def run_simulation_regional(
             if not discovered_share:
                 if cum_sales_total > 0:
                     share_a = cum_sales_a / cum_sales_total
-                    # Snap to clean 10% increments for parity with the slider
                     snap = round(share_a * 10) / 10
                     if abs(share_a - snap) < 0.05:
                         share_a = float(snap)
                 share_a = max(0.10, min(0.90, share_a))
                 discovered_share = True
+                # Independently lock the seasonal magnitude factor f_seasonal
+                # = Σ actual_total[1..w] / Σ curve[1..w] (the planner's
+                # discovered "size of the season"). Snap to clean integer or
+                # 0.1 increment within rounding tolerance.
+                if seasonal_mode and f_seasonal is None:
+                    actual_cum = float(sum(demand[i] for i in range(1, w + 1)
+                                           if i < len(demand)))
+                    expected_cum = float(sum(planner_curve_internal[i]
+                                             for i in range(1, w + 1)))
+                    if expected_cum > 0.01:
+                        raw = actual_cum / expected_cum
+                        snap_i = round(raw)
+                        if abs(raw - snap_i) < 0.05 and snap_i > 0:
+                            f_seasonal = float(snap_i)
+                        else:
+                            snap_1 = round(raw * 10) / 10
+                            f_seasonal = snap_1 if abs(raw - snap_1) < 0.02 else raw
+                    else:
+                        f_seasonal = 1.0
             share_b = 1.0 - share_a
 
-            # Chain-aggregate target per stage
+            # Stage-target "rate" — flat uses this week's observed demand;
+            # seasonal uses a forward look-ahead over the planner curve.
+            def _lookahead(cov):
+                if not seasonal_mode or f_seasonal is None:
+                    return None
+                tot = 0.0
+                for i in range(w + 1, min(w + cov + 1, len(planner_curve_internal))):
+                    tot += planner_curve_internal[i]
+                return f_seasonal * tot
+
             ff_now = float(dem_tot) if dem_tot > 0 else ff
             ex_sup  = float(stores_a.sum() + stores_b.sum() + sum(mat_pipe) + raw_mat
                             + sum(semi_pipe) + semi + sum(fp_pipe) + cw
@@ -313,9 +361,16 @@ def run_simulation_regional(
                             + float(sum(sum(dp) for dp in dist_pipes_b))
                             + fp_backlog)
 
-            tgt_sup_total  = ff_now * cov_sup_a
-            tgt_semi_total = ff_now * cov_semi_a
-            tgt_fp_total   = ff_now * cov_fp_a
+            if seasonal_mode and f_seasonal is not None:
+                tgt_sup_total  = _lookahead(cov_sup_a)  or 0.0
+                tgt_semi_total = _lookahead(cov_semi_a) or 0.0
+                tgt_fp_total   = _lookahead(cov_fp_a)   or 0.0
+                tgt_cwrw_total = _lookahead(cov_cwrw)   or 0.0
+            else:
+                tgt_sup_total  = ff_now * cov_sup_a
+                tgt_semi_total = ff_now * cov_semi_a
+                tgt_fp_total   = ff_now * cov_fp_a
+                tgt_cwrw_total = ff_now * cov_cwrw
 
             pooled_sup  = math.ceil(max(0, tgt_sup_total  - ex_sup))
             pooled_semi = math.ceil(max(0, tgt_semi_total - ex_semi))
@@ -332,7 +387,12 @@ def run_simulation_regional(
             inv_b_full = float(stores_b.sum() + rw_b + sum(cw_rw_pipe_b)
                                + float(sum(sum(dp) for dp in dist_pipes_b)))
             def _reg_short(stage_cov: int, region: str) -> float:
-                tgt = ff_now * stage_cov * (share_a if region == 'A' else share_b)
+                # Seasonal-aware: scale the look-ahead by the region's share
+                if seasonal_mode and f_seasonal is not None:
+                    la = _lookahead(stage_cov) or 0.0
+                    tgt = la * (share_a if region == 'A' else share_b)
+                else:
+                    tgt = ff_now * stage_cov * (share_a if region == 'A' else share_b)
                 inv = (inv_a_full if region == 'A' else inv_b_full)
                 inv += (share_a if region == 'A' else share_b) * upstream_undiff
                 return max(0.0, tgt - inv)
@@ -346,8 +406,13 @@ def run_simulation_regional(
             fp_ord   = max(pooled_fp,   math.ceil(max(0, fp_reg_total   - fp_backlog)))
 
             # Per-region CW→RW push order = MAX(pooled-share, regional gap)
-            tgt_a = ff_now * cov_cwrw * share_a
-            tgt_b = ff_now * cov_cwrw * share_b
+            if seasonal_mode and f_seasonal is not None:
+                la_cwrw = _lookahead(cov_cwrw) or 0.0
+                tgt_a = la_cwrw * share_a
+                tgt_b = la_cwrw * share_b
+            else:
+                tgt_a = ff_now * cov_cwrw * share_a
+                tgt_b = ff_now * cov_cwrw * share_b
             inv_a_cw = float(rw_a + sum(cw_rw_pipe_a)
                              + float(sum(sum(dp) for dp in dist_pipes_a))
                              + float(stores_a.sum()))
@@ -474,6 +539,12 @@ def run_simulation_regional(
             'sales_a': sales_a, 'sales_b': sales_b,
             'missed_a': missed_a, 'missed_b': missed_b,
             'demand_a': dem_a, 'demand_b': dem_b,
+            'per_store_dem_a':    per_a.tolist(),
+            'per_store_sales_a':  sales_a_arr.tolist(),
+            'per_store_missed_a': (per_a - sales_a_arr).tolist(),
+            'per_store_dem_b':    per_b.tolist(),
+            'per_store_sales_b':  sales_b_arr.tolist(),
+            'per_store_missed_b': (per_b - sales_b_arr).tolist(),
             'sup_order': sup_ord,
         })
 
@@ -515,5 +586,6 @@ def run_simulation_regional(
         'sell_through': tot_sales / tot_produced if tot_produced else 0.0,
         'revenue': revenue, 'cogs': cogs, 'fixed': fixed, 'margin': margin,
         'margin_pct_rev': margin / revenue if revenue else 0.0,
-        'share_a_locked': share_a if discovered_share else None,
+        'share_a_locked':    share_a if discovered_share else None,
+        'f_seasonal_locked': f_seasonal,
     }

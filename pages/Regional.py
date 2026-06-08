@@ -17,6 +17,8 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 import sim_regional as sim
+# Import seasonal-curve helpers from the main app (defined at module top)
+from app import seasonal_curve, seasonal_curve_float, TIER_SHARE
 
 st.set_page_config(layout="wide", page_title="Regional 2-RW Simulator", page_icon="\U0001F30D")
 st.title("\U0001F30D  Regional 2-RW Simulator")
@@ -62,6 +64,9 @@ _set("reg_split", 50)
 _set("reg_weeks", 26)
 _set("reg_n_per_region", 50)
 _set("reg_demand_per_wk", 100)
+_set("reg_demand_mode", "Flat")
+_set("reg_seas_sub", "Steep")
+_set("reg_seas_avg", 100)
 _set("reg_mat_lt", 4)
 _set("reg_semi_lt", 2)
 _set("reg_fp_lt", 1)
@@ -86,7 +91,29 @@ with st.sidebar:
     st.markdown("### ⚙️ Simulation")
     st.session_state.reg_weeks         = st.slider("Weeks", 4, 52, st.session_state.reg_weeks, key="w_reg_weeks")
     st.session_state.reg_n_per_region  = st.slider("Stores per region (N)", 10, 250, st.session_state.reg_n_per_region, step=10, key="w_reg_n")
-    st.session_state.reg_demand_per_wk = st.slider("Flat demand (pcs/wk)", 0, 500, st.session_state.reg_demand_per_wk, step=10, key="w_reg_dem")
+
+    st.markdown("### \U0001F4C8 Demand")
+    st.session_state.reg_demand_mode = st.radio(
+        "Demand profile", ["Flat", "Seasonal"],
+        index=0 if st.session_state.reg_demand_mode == "Flat" else 1,
+        horizontal=True, key="w_reg_dmode",
+    )
+    if st.session_state.reg_demand_mode == "Flat":
+        st.session_state.reg_demand_per_wk = st.slider(
+            "Flat demand (pcs/wk)", 0, 500, st.session_state.reg_demand_per_wk, step=10, key="w_reg_dem")
+    else:
+        st.session_state.reg_seas_sub = st.radio(
+            "Curve shape", ["Very Steep", "Steep", "~Flat"],
+            index=["Very Steep","Steep","~Flat"].index(st.session_state.reg_seas_sub),
+            horizontal=True, key="w_reg_seas_sub")
+        st.session_state.reg_seas_avg = st.slider(
+            "Seasonal avg (pcs/wk)", 0, 500, st.session_state.reg_seas_avg, step=10, key="w_reg_seas_avg",
+            help="The actual demand curve will be scaled so its average matches this. "
+                 "The planner's BELIEF is always avg=100 — it discovers the magnitude at first review.",
+        )
+        # Inline preview of the demand curve
+        preview = seasonal_curve(st.session_state.reg_weeks, st.session_state.reg_seas_sub, st.session_state.reg_seas_avg)
+        st.caption(f"Total demand: **{sum(preview)} pcs** · peak **{max(preview)}/wk** at W{preview.index(max(preview))+1}")
 
     st.markdown("### \U0001F4CD Region split")
     st.session_state.reg_split = st.slider(
@@ -217,7 +244,16 @@ init_cw    = int(round(T * dist['cw']    / 100))
 init_rw    = int(round(T * dist['rw']    / 100))
 init_store = T - init_mat - init_semi - init_cw - init_rw
 
-demand_curve = [st.session_state.reg_demand_per_wk] * st.session_state.reg_weeks
+if st.session_state.reg_demand_mode == "Flat":
+    demand_curve = [st.session_state.reg_demand_per_wk] * st.session_state.reg_weeks
+    planner_curve_arg = None
+else:
+    demand_curve = seasonal_curve(
+        st.session_state.reg_weeks, st.session_state.reg_seas_sub,
+        st.session_state.reg_seas_avg)
+    # Planner believes the same SHAPE normalised to avg=100/wk
+    planner_curve_arg = list(seasonal_curve_float(
+        st.session_state.reg_weeks, st.session_state.reg_seas_sub, 100))
 
 r = sim.run_simulation_regional(
     weeks=st.session_state.reg_weeks,
@@ -239,6 +275,7 @@ r = sim.run_simulation_regional(
     price=st.session_state.reg_price,
     fixed_pct=st.session_state.reg_fixed_pct / 100.0,
     base_forecast=st.session_state.reg_demand_per_wk or 100,
+    planner_curve=planner_curve_arg,
 )
 
 # ── KPI rows ──────────────────────────────────────────────────────────────
@@ -289,9 +326,13 @@ ks[3].markdown(_kpi("Stockout wks A | B",
     f"{sw_a}/{st.session_state.reg_weeks} | {sw_b}/{st.session_state.reg_weeks}",
     "#1a8a4a" if (sw_a + sw_b) == 0 else "#c0392b"), unsafe_allow_html=True)
 
+_locks = []
 if r['share_a_locked'] is not None:
-    st.caption(f"_Planner locked share_A = **{r['share_a_locked']*100:.0f}%** at first review._ "
-               f"(Ground truth: {st.session_state.reg_split}%)")
+    _locks.append(f"share_A = **{r['share_a_locked']*100:.0f}%** (ground truth {st.session_state.reg_split}%)")
+if r.get('f_seasonal_locked') is not None:
+    _locks.append(f"f_seasonal = **{r['f_seasonal_locked']:.2f}**")
+if _locks:
+    st.caption("_Planner locked at first review:_ " + " · ".join(_locks))
 
 # ── Weekly chart: aggregate demand vs sales ────────────────────────────────
 st.markdown("### \U0001F4C8 Weekly demand vs sales (aggregate)")
@@ -322,6 +363,77 @@ ch2 = alt.Chart(region_data).mark_bar().encode(
     color=alt.Color('Region:N', scale=alt.Scale(domain=['A','B'], range=['#2c5f8a','#c97a2c']))
 ).properties(height=220)
 st.altair_chart(ch2, use_container_width=True)
+
+# ── Per-region heatmaps (side-by-side) ─────────────────────────────────────
+st.markdown("### \U0001F525 Per-region sales matrix")
+st.caption(
+    "🟢 **Sold** (had stock, demand met) · 🔴 **Missed** (demand but empty) · "
+    "🟡 **Held** (had stock, no demand) · ⚪ **Idle** (empty, no demand). "
+    "Stores in each region ordered top-to-bottom: high-selling → medium → small."
+)
+
+def _heatmap_for_region(side):
+    """Build a sales-matrix heatmap for Region A ('a') or B ('b')."""
+    n = st.session_state.reg_n_per_region
+    # Tier ordering label for the y-axis (consistent with single-region heatmap)
+    rows_data = []
+    for w_idx in range(1, len(r['states'])):
+        st_obj = r['states'][w_idx]
+        per_dem = st_obj[f'per_store_dem_{side}']
+        per_sal = st_obj[f'per_store_sales_{side}']
+        per_mis = st_obj[f'per_store_missed_{side}']
+        stk_arr = st_obj[f'stores_{side}']
+        for i in range(n):
+            dem    = per_dem[i] if i < len(per_dem) else 0
+            sales  = per_sal[i] if i < len(per_sal) else 0
+            missed = per_mis[i] if i < len(per_mis) else 0
+            stk    = stk_arr[i] if i < len(stk_arr) else 0
+            if missed > 0.5:    state = "Missed"
+            elif dem > 0.5:     state = "Sold"
+            elif stk >= 1:      state = "Held"
+            else:               state = "Idle"
+            rows_data.append({
+                'store': i + 1, 'week': w_idx, 'state': state,
+                'demand': dem, 'sales': sales, 'missed': missed, 'stock': stk,
+            })
+    df = pd.DataFrame(rows_data)
+    unique_stores = sorted(df['store'].unique()) if not df.empty else [1]
+    n_rows = len(unique_stores)
+    if n_rows <= 50: row_h = 12
+    elif n_rows <= 100: row_h = 8
+    elif n_rows <= 200: row_h = 5
+    else: row_h = max(3, 1200 // n_rows)
+    try:
+        alt.data_transformers.disable_max_rows()
+    except Exception:
+        pass
+    return (
+        alt.Chart(df).mark_rect(stroke='white', strokeWidth=0.4).encode(
+            x=alt.X('week:O', title='Week'),
+            y=alt.Y('store:O', sort=unique_stores, title=f'Region {side.upper()} stores (top: high-selling)'),
+            color=alt.Color('state:N',
+                scale=alt.Scale(domain=['Sold','Missed','Held','Idle'],
+                                range=['#1a8a4a','#c0392b','#f1c40f','#e8e8e8']),
+                legend=alt.Legend(title='State', orient='top')),
+            tooltip=[
+                alt.Tooltip('store:O', title='Store (within region)'),
+                alt.Tooltip('week:O',  title='Week'),
+                alt.Tooltip('demand:Q', title='Demand'),
+                alt.Tooltip('sales:Q', title='Sales'),
+                alt.Tooltip('missed:Q', title='Missed'),
+                alt.Tooltip('stock:Q', title='End-of-week stock'),
+                alt.Tooltip('state:N', title='State'),
+            ],
+        ).properties(height=max(180, row_h * n_rows))
+    )
+
+hc1, hc2 = st.columns(2)
+with hc1:
+    st.markdown("**Region A**")
+    st.altair_chart(_heatmap_for_region('a'), use_container_width=True)
+with hc2:
+    st.markdown("**Region B**")
+    st.altair_chart(_heatmap_for_region('b'), use_container_width=True)
 
 # ── Chain inventory chart ──────────────────────────────────────────────────
 st.markdown("### \U0001F4E6 End-of-week stock by location")
@@ -374,6 +486,7 @@ with st.expander("\U0001F4CA Run the 9-cell grid (current LT + demand)", expande
                     price=st.session_state.reg_price,
                     fixed_pct=st.session_state.reg_fixed_pct / 100.0,
                     base_forecast=st.session_state.reg_demand_per_wk or 100,
+                    planner_curve=planner_curve_arg,
                 )
                 rows.append({
                     'Split': f"{sp}/{100-sp}",
