@@ -391,17 +391,14 @@ def _deterministic_per_store_demand(week, dem_total, n_high, n_medium, n_small):
 
     demand = np.zeros(N, dtype=int)
 
-    # High-Selling: even base + the first `rem` high-selling stores always get +1
-    # (deterministic — rule from spec, lands at target in long run).
-    if n_high > 0:
-        base = bkt_f_int // n_high
-        rem  = bkt_f_int -  base * n_high
-        demand[:n_high] = base
-        if rem > 0:
-            demand[:rem] += 1
-
-    # Medium / Small: even base + cyclic rotation of the integer remainder
-    # so every store in the bucket hits its long-run average.
+    # High / Medium / Small: even base + cyclic rotation of the integer
+    # remainder by week, so every store in the bucket hits its long-run
+    # average. (Previously only medium/small rotated; the high tier
+    # awarded the +1 to the first `rem` stores permanently, which created
+    # a within-tier asymmetry against operator-uniform initial stock.
+    # Now all three tiers rotate consistently and the high tier still
+    # receives the per-week rounding residual via the bkt_h_int path
+    # above.)
     def _fill(start, n, total):
         if n == 0 or total == 0:
             return
@@ -412,6 +409,7 @@ def _deterministic_per_store_demand(week, dem_total, n_high, n_medium, n_small):
             offset = ((week - 1) * rem) % n
             for k in range(rem):
                 demand[start + ((offset + k) % n)] += 1
+    _fill(0,                       n_high,   bkt_f_int)
     _fill(n_high,            n_medium, bkt_m_int)
     _fill(n_high + n_medium, n_small,  bkt_s_int)
 

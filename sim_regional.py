@@ -56,11 +56,15 @@ def _deterministic_demand(week: int, dem_total: int, n_h: int, n_m: int, n_s: in
             bkt_m += give; residual -= give
             bkt_s += residual
     out = np.zeros(N, dtype=int)
-    # high: first `rem` stores always
-    if n_h > 0:
-        base = bkt_h // n_h; rem = bkt_h - base * n_h
-        out[:n_h] = base
-        if rem > 0: out[:rem] += 1
+    # All three tiers: even base + rotated +1 by week. The high tier USED
+    # TO favour the first `rem` stores permanently (per the original
+    # spec). That created a within-tier asymmetry which, combined with
+    # operator-uniform init, produced a numerical artifact (90/10 looked
+    # better than 70/30 because B's bucket happened to divide evenly).
+    # Rotating the +1 across the high tier by week (same as medium / small)
+    # gives every store in a tier the same long-run rate, so the artifact
+    # disappears and the per-tier total still receives the rounding
+    # residual that the residual-to-high rule already pushed onto bkt_h.
     def _fill(start, n, total):
         if n == 0 or total == 0: return
         base = total // n; rem = total - base * n
@@ -69,8 +73,9 @@ def _deterministic_demand(week: int, dem_total: int, n_h: int, n_m: int, n_s: in
             offset = ((week - 1) * rem) % n
             for k in range(rem):
                 out[start + ((offset + k) % n)] += 1
-    _fill(n_h,        n_m, bkt_m)
-    _fill(n_h + n_m,  n_s, bkt_s)
+    _fill(0,             n_h, bkt_h)
+    _fill(n_h,           n_m, bkt_m)
+    _fill(n_h + n_m,     n_s, bkt_s)
     return out
 
 
@@ -187,39 +192,69 @@ def run_simulation_regional(
     store_a_total = int(round(init_store_total * region_split_a))
     store_b_total = int(init_store_total - store_a_total)
 
-    # Within each region, distribute init stock by EXPECTED PER-STORE
-    # weekly demand averaged over a full rotation cycle, not by uniform
-    # tier weight. This fixes the artifact where stores at the front of
-    # a tier (which always get the +1 from integer rounding in the
-    # deterministic high-tier rule) systematically missed sales because
-    # every same-tier store started with identical init.
+    # Within each region, distribute initial stock by EXPECTED TIER-LEVEL
+    # demand (bucket totals from one normalised week), uniform within tier.
+    # This is what a real operator does: allocate "X% of the regional
+    # buffer to the high-selling stores, Y% to medium, Z% to small", and
+    # give every store in the same tier the same number of units. No
+    # foreknowledge of per-store demand inside a tier.
     #
-    # Averaging over `weeks` weeks captures the medium/small rotation
-    # AND the permanent high-tier "first N always +1" bias, so each
-    # store's init reflects its real expected demand over the run.
+    # Crucially this uses the ACTUAL bucket totals (15·n_h, 6·n_m, n_s
+    # plus the rounding residual that always goes to high) rather than
+    # the unaltered tier weights — so the high tier is not systematically
+    # under-allocated by the residual that the demand model later pushes
+    # onto it.
     base_dem_a = max(1, int(round(base_forecast * region_split_a)))
     base_dem_b = max(1, int(round(base_forecast * region_split_b)))
-    expected_per_store_a = np.zeros(N_REG, dtype=float)
-    expected_per_store_b = np.zeros(N_REG, dtype=float)
-    for _w in range(1, max(2, weeks + 1)):
-        expected_per_store_a += _deterministic_demand(_w, base_dem_a, n_h, n_m, n_s).astype(float)
-        expected_per_store_b += _deterministic_demand(_w, base_dem_b, n_h, n_m, n_s).astype(float)
-    expected_per_store_a = np.maximum(expected_per_store_a, 1e-3)
-    expected_per_store_b = np.maximum(expected_per_store_b, 1e-3)
+    sample_a = _deterministic_demand(1, base_dem_a, n_h, n_m, n_s)
+    sample_b = _deterministic_demand(1, base_dem_b, n_h, n_m, n_s)
+    bkt_h_a = float(sample_a[:n_h].sum())
+    bkt_m_a = float(sample_a[n_h:n_h + n_m].sum())
+    bkt_s_a = float(sample_a[n_h + n_m:].sum())
+    bkt_h_b = float(sample_b[:n_h].sum())
+    bkt_m_b = float(sample_b[n_h:n_h + n_m].sum())
+    bkt_s_b = float(sample_b[n_h + n_m:].sum())
 
-    def _split_by_expected(total: int, expected: np.ndarray) -> np.ndarray:
+    def _split_tier_uniform(total: int, bkt_h: float, bkt_m: float, bkt_s: float) -> np.ndarray:
         if N_REG == 0 or total == 0:
             return np.zeros(N_REG, dtype=int)
-        raw = total * expected / expected.sum()
-        floors = np.floor(raw).astype(int)
-        rem = total - int(floors.sum())
-        if rem > 0:
-            order = np.argsort(-(raw - floors))
-            floors[order[:rem]] += 1
-        return floors
+        bkt_sum = bkt_h + bkt_m + bkt_s
+        if bkt_sum <= 0:
+            return np.zeros(N_REG, dtype=int)
+        # Tier totals (operator's planned per-tier buffer)
+        tier_h_tot = total * bkt_h / bkt_sum
+        tier_m_tot = total * bkt_m / bkt_sum
+        tier_s_tot = total * bkt_s / bkt_sum
+        # Uniform within tier (largest-remainder so the total stays exact)
+        out = np.zeros(N_REG, dtype=int)
+        def _spread(start, n, tier_tot):
+            if n == 0: return
+            per = tier_tot / n
+            floor_per = int(np.floor(per))
+            out[start:start + n] = floor_per
+            short = int(round(tier_tot)) - floor_per * n
+            if short > 0:
+                out[start:start + short] += 1
+        _spread(0,              n_h, tier_h_tot)
+        _spread(n_h,            n_m, tier_m_tot)
+        _spread(n_h + n_m,      n_s, tier_s_tot)
+        # Final largest-remainder pass to make the grand total exact
+        diff = total - int(out.sum())
+        if diff > 0:
+            for i in range(diff):
+                out[i % N_REG] += 1
+        elif diff < 0:
+            i = 0
+            while diff < 0 and i < N_REG * 2:
+                idx = i % N_REG
+                if out[idx] > 0:
+                    out[idx] -= 1
+                    diff += 1
+                i += 1
+        return out
 
-    stores_a = _split_by_expected(store_a_total, expected_per_store_a)
-    stores_b = _split_by_expected(store_b_total, expected_per_store_b)
+    stores_a = _split_tier_uniform(store_a_total, bkt_h_a, bkt_m_a, bkt_s_a)
+    stores_b = _split_tier_uniform(store_b_total, bkt_h_b, bkt_m_b, bkt_s_b)
 
     # ── Pipes ──
     mat_pipe   = [0.0] * max(1, mat_lt)
