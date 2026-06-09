@@ -262,11 +262,10 @@ html = f"""<!doctype html>
 <div class="hyp">
   <h3>Hypotheses fixed across the 9 cells</h3>
   <ul>
-    <li><b>Total demand identical</b>: 100 pcs/wk &times; 26 wks = <b>2,600 units</b> in every cell.
-        The split slider only changes how those 2,600 are divided between Region A and B; the chain sees the same aggregate signal.</li>
-    <li><b>Right-sized chain</b>: initial stock equals (total LT + 1) &times; demand. The planner reaches steady state quickly and the supplier orders track weekly demand 1-for-1 (~100 pcs/wk).</li>
-    <li><b>Steady-state production is the same in every cell</b>: produced &asymp; 2,600 + WIP &asymp; init &approx;3,900 units regardless of split or distribution. That's why <b>sell-through clusters tightly</b> around 66&ndash;67% &mdash; the differences come entirely from the small fraction of demand that ends up <b>missed</b>.</li>
-    <li><b>Margin differences are missed-sales differences</b>: each missed unit = &minus;€10 revenue at unchanged COGS. With 99% service rates, the spread is naturally narrow.</li>
+    <li><span style="background:#fff7e1;padding:2px 6px;border-radius:3px;font-weight:600;color:#9a6a00;">CORRECTED</span> <b>W0 stock split 50/50 between regions</b>: at W0 the operator does NOT yet know the demand split. RW init and store init are split evenly between Region A and B regardless of the slider's ground truth. At 90/10 split, A faces 2,340 demand with only 1,300 dedicated W0 units &mdash; the chain has to do the rest via replenishment + smart distribution.</li>
+    <li><b>Total demand identical</b>: 100 pcs/wk &times; 26 wks = <b>2,600 units</b> in every cell. The split slider only changes how those 2,600 are divided between Region A and B.</li>
+    <li><b>Right-sized chain</b>: initial stock equals (total LT + 1) &times; demand. The planner reaches steady state quickly and the supplier orders track weekly demand ~1-for-1 in balanced cases.</li>
+    <li><b>Margin differences are missed-sales differences + over-production cost</b>: each missed unit costs &minus;&euro;10 revenue; each over-produced unit costs +&euro;5 COGS.</li>
     <li><b>Planner discovers the regional split at the first review</b> (week 1, since freq=1). It is locked from then on and never re-bases.</li>
     <li><b>Smart distribution is on everywhere</b>: water-fills both CW&rarr;RW (prioritise starved region) and RW&rarr;Store (within region only &mdash; no cross-region transfers).</li>
     <li><b>No production cap</b>: the chain produces freely. Tightening prod_cap or shrinking initial stock are the levers that would amplify differences between distributions.</li>

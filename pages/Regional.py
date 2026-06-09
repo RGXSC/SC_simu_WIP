@@ -25,35 +25,28 @@ st.title("\U0001F30D  Regional 2-RW Simulator")
 st.caption("Chain: Supplier → Material → Semi → FP → **CW → RW A / RW B → Stores**. "
            "Planner discovers the regional demand split at the first review.")
 
-with st.expander("ℹ️ Why does sell-through cluster so tightly across the 9 cells?", expanded=False):
+with st.expander("ℹ️ How the W0 pre-positioning works", expanded=False):
     st.markdown("""
-**Sell-through = sales ÷ produced.** Both numbers move together in every cell:
+**W0 stock is split 50/50 between the two regions** — both RW init and store
+init — regardless of the demand-split slider. This reflects the operator's
+real-world position at week 0: they don't yet know the regional split. The
+planner only **discovers** the split at the first review (week = order
+frequency), and from then on the smart allocator routes the CW pool to the
+starved region.
 
-- **Produced is almost identical across cells.** The planner's target is
-  `forecast × coverage` (≈ 100 × 14 = 1,400 units at every stage), and total
-  initial inventory equals that target. So weekly supplier orders just track
-  weekly demand (~100/wk) — **regardless of where the 1,400 sits at W0**.
-- **Sales are very similar too.** 99% service is 99% service: the spread
-  between best and worst is only ~30 missed-unit difference out of 2,600 demand.
+So at **90/10 split + 0/0/100 distribution**, Region A's 50 stores hold only
+half the total store stock (1,300 units) but face 90% of the demand
+(2,340 units over 26 weeks). The chain has to refill A through the
+CW → RW → Store cascade, paying transit time. At one-shot (prod_cap = init)
+this is unrecoverable — A starves. With replenishment the chain catches up
+but at extreme skew the LT penalty remains visible.
 
-So 30/30/40's *better allocation* (catching Region B starvation at first
-review) reduces missed sales by tens of units — visible in **service** and
-**margin** (€175 spread), but invisible in sell-through (0.4 pp spread).
-
-**To make distribution choices actually move sell-through:**
-
-1. **Enforce a lifetime production cap** (`prod_cap` ≈ slightly above demand).
-   The chain can't over-buffer, so wasted units in the wrong region directly
-   cost a sale → sell-through drops in the bad cells and rises in the good
-   ones.
-2. **Reduce initial stock below LT+1.** Same effect: the chain is starved,
-   so the right placement at W0 matters far more than the planner's later
-   corrections.
-3. **Use seasonal demand.** The planner ALSO gets the magnitude wrong, so
-   over-production happens in some cells and not others.
-
-Toggle the production cap in the sidebar and re-run the 9-cell grid to see
-the spread open up.
+**Within each region, store init is split by tier-bucket-share**: 40% to
+the 5 high-selling stores, 46% to the 15 medium, 14% to the 30 small. Each
+tier ends up with the same weeks-of-cover (assuming the planner's prior is
+even split). That's the operator's planning heuristic — give the
+high-sellers more stock because they sell more — and it's tier-uniform
+within each tier (no foreknowledge of per-store demand inside a tier).
     """)
 
 # ── Defaults (session_state persistence) ─────────────────────────────────

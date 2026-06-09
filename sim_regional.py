@@ -186,34 +186,28 @@ def run_simulation_regional(
         N_REG = 1
 
     # ── Initial stocks ──
-    rw_a = int(round(init_rw_total * region_split_a))
-    rw_b = int(init_rw_total - rw_a)
+    # The W0 operator does NOT know the regional demand split — the
+    # planner discovers it at the first review. So initial stock is split
+    # 50/50 between RW A / RW B and between Stores A / Stores B regardless
+    # of the ground-truth slider. This is the user-corrected model: the
+    # region split is a property of demand, not of pre-positioning.
+    rw_a = init_rw_total // 2
+    rw_b = init_rw_total - rw_a
 
-    store_a_total = int(round(init_store_total * region_split_a))
-    store_b_total = int(init_store_total - store_a_total)
+    store_a_total = init_store_total // 2
+    store_b_total = init_store_total - store_a_total
 
     # Within each region, distribute initial stock by EXPECTED TIER-LEVEL
-    # demand (bucket totals from one normalised week), uniform within tier.
-    # This is what a real operator does: allocate "X% of the regional
-    # buffer to the high-selling stores, Y% to medium, Z% to small", and
-    # give every store in the same tier the same number of units. No
-    # foreknowledge of per-store demand inside a tier.
-    #
-    # Crucially this uses the ACTUAL bucket totals (15·n_h, 6·n_m, n_s
-    # plus the rounding residual that always goes to high) rather than
-    # the unaltered tier weights — so the high tier is not systematically
-    # under-allocated by the residual that the demand model later pushes
-    # onto it.
-    base_dem_a = max(1, int(round(base_forecast * region_split_a)))
-    base_dem_b = max(1, int(round(base_forecast * region_split_b)))
-    sample_a = _deterministic_demand(1, base_dem_a, n_h, n_m, n_s)
-    sample_b = _deterministic_demand(1, base_dem_b, n_h, n_m, n_s)
-    bkt_h_a = float(sample_a[:n_h].sum())
-    bkt_m_a = float(sample_a[n_h:n_h + n_m].sum())
-    bkt_s_a = float(sample_a[n_h + n_m:].sum())
-    bkt_h_b = float(sample_b[:n_h].sum())
-    bkt_m_b = float(sample_b[n_h:n_h + n_m].sum())
-    bkt_s_b = float(sample_b[n_h + n_m:].sum())
+    # demand bucket totals (uniform within tier — operator-realistic).
+    # The bucket totals are computed against the OPERATOR'S PRIOR BELIEF
+    # that each region carries half the base forecast, since the regional
+    # share has not yet been discovered at W0. This keeps the tier ratios
+    # symmetric across regions.
+    base_dem_per_region = max(1, int(round(base_forecast * 0.5)))
+    sample = _deterministic_demand(1, base_dem_per_region, n_h, n_m, n_s)
+    bkt_h = float(sample[:n_h].sum())
+    bkt_m = float(sample[n_h:n_h + n_m].sum())
+    bkt_s = float(sample[n_h + n_m:].sum())
 
     def _split_tier_uniform(total: int, bkt_h: float, bkt_m: float, bkt_s: float) -> np.ndarray:
         if N_REG == 0 or total == 0:
@@ -221,11 +215,9 @@ def run_simulation_regional(
         bkt_sum = bkt_h + bkt_m + bkt_s
         if bkt_sum <= 0:
             return np.zeros(N_REG, dtype=int)
-        # Tier totals (operator's planned per-tier buffer)
         tier_h_tot = total * bkt_h / bkt_sum
         tier_m_tot = total * bkt_m / bkt_sum
         tier_s_tot = total * bkt_s / bkt_sum
-        # Uniform within tier (largest-remainder so the total stays exact)
         out = np.zeros(N_REG, dtype=int)
         def _spread(start, n, tier_tot):
             if n == 0: return
@@ -238,7 +230,6 @@ def run_simulation_regional(
         _spread(0,              n_h, tier_h_tot)
         _spread(n_h,            n_m, tier_m_tot)
         _spread(n_h + n_m,      n_s, tier_s_tot)
-        # Final largest-remainder pass to make the grand total exact
         diff = total - int(out.sum())
         if diff > 0:
             for i in range(diff):
@@ -253,8 +244,8 @@ def run_simulation_regional(
                 i += 1
         return out
 
-    stores_a = _split_tier_uniform(store_a_total, bkt_h_a, bkt_m_a, bkt_s_a)
-    stores_b = _split_tier_uniform(store_b_total, bkt_h_b, bkt_m_b, bkt_s_b)
+    stores_a = _split_tier_uniform(store_a_total, bkt_h, bkt_m, bkt_s)
+    stores_b = _split_tier_uniform(store_b_total, bkt_h, bkt_m, bkt_s)
 
     # ── Pipes ──
     mat_pipe   = [0.0] * max(1, mat_lt)

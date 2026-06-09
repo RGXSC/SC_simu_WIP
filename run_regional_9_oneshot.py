@@ -230,13 +230,13 @@ html = f"""<!doctype html>
 <div class="hyp">
   <h3>Hypotheses fixed across the 9 cells</h3>
   <ul>
+    <li><span class="new">CORRECTED</span> <b>W0 stock split 50/50 between regions</b>: at W0 the operator does NOT yet know the demand split — the planner only discovers it at the first review. So both RW init and store init are divided evenly between Region A and Region B regardless of the slider's ground truth. This is the lever that exposes A-side starvation at skewed splits: 90/10 means A faces 2,340 demand with only 1,300 units of dedicated W0 stock.</li>
     <li><span class="new">NEW</span> <b>One-shot product</b>: the lifetime production cap is set to <b>2,600 = initial stock</b>. Supplier orders are forced to zero from W1 onwards. Whatever the chain holds at week 0 is all it will ever have.</li>
     <li><span class="new">NEW</span> <b>Total LT shortened to 5 wk (Agile)</b>: upstream LT is dead weight here (nothing is produced), so we leave only the distribution legs (CW→RW=1, RW→Store=1) plus a token mat/semi/fp=1 each.</li>
     <li><b>Total demand identical</b>: 100 pcs/wk × 26 wks = <b>2,600 units</b> in every cell. The split slider only changes how those 2,600 are divided between Region A and B.</li>
-    <li><b>Sell-through can now reach 100%</b>: with no over-production possible, the only waste is units stranded at stores or RWs that demand never reached. Sell-through becomes a meaningful measure of allocation quality.</li>
-    <li><b>Service-rate ceiling = 100%</b>: in principle the 2,600 units can cover the 2,600 demand. The question is whether the chain can get the right unit to the right region within 26 weeks (smart distribution + 2 wks CW→Store transit).</li>
+    <li><b>Smart distribution is on everywhere</b>: water-fills CW→RW (prioritise starved region) and RW→Store (within region, no cross-region transfers). Once the planner discovers the split, it routes the CW pool to whoever is short — but it cannot reroute units already at stores or already in an RW.</li>
+    <li><b>Strict regional isolation</b>: stock at RW A only feeds Region A's stores; same for B. So if Region B has surplus, it can't rescue Region A.</li>
     <li><b>Planner discovers the regional split at the first review</b> (week 1, since freq=1). It is locked from then on and never re-bases.</li>
-    <li><b>Smart distribution is on everywhere</b>: water-fills CW→RW (prioritise starved region) and RW→Store (within region, no cross-region transfers).</li>
   </ul>
 </div>
 

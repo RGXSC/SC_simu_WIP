@@ -75,13 +75,13 @@
 <div class="hyp">
   <h3>Hypotheses fixed across the 9 cells</h3>
   <ul>
+    <li><span class="new">CORRECTED</span> <b>W0 stock split 50/50 between regions</b>: at W0 the operator does NOT yet know the demand split — the planner only discovers it at the first review. So both RW init and store init are divided evenly between Region A and Region B regardless of the slider's ground truth. This is the lever that exposes A-side starvation at skewed splits: 90/10 means A faces 2,340 demand with only 1,300 units of dedicated W0 stock.</li>
     <li><span class="new">NEW</span> <b>One-shot product</b>: the lifetime production cap is set to <b>2,600 = initial stock</b>. Supplier orders are forced to zero from W1 onwards. Whatever the chain holds at week 0 is all it will ever have.</li>
     <li><span class="new">NEW</span> <b>Total LT shortened to 5 wk (Agile)</b>: upstream LT is dead weight here (nothing is produced), so we leave only the distribution legs (CW→RW=1, RW→Store=1) plus a token mat/semi/fp=1 each.</li>
     <li><b>Total demand identical</b>: 100 pcs/wk × 26 wks = <b>2,600 units</b> in every cell. The split slider only changes how those 2,600 are divided between Region A and B.</li>
-    <li><b>Sell-through can now reach 100%</b>: with no over-production possible, the only waste is units stranded at stores or RWs that demand never reached. Sell-through becomes a meaningful measure of allocation quality.</li>
-    <li><b>Service-rate ceiling = 100%</b>: in principle the 2,600 units can cover the 2,600 demand. The question is whether the chain can get the right unit to the right region within 26 weeks (smart distribution + 2 wks CW→Store transit).</li>
+    <li><b>Smart distribution is on everywhere</b>: water-fills CW→RW (prioritise starved region) and RW→Store (within region, no cross-region transfers). Once the planner discovers the split, it routes the CW pool to whoever is short — but it cannot reroute units already at stores or already in an RW.</li>
+    <li><b>Strict regional isolation</b>: stock at RW A only feeds Region A's stores; same for B. So if Region B has surplus, it can't rescue Region A.</li>
     <li><b>Planner discovers the regional split at the first review</b> (week 1, since freq=1). It is locked from then on and never re-bases.</li>
-    <li><b>Smart distribution is on everywhere</b>: water-fills CW→RW (prioritise starved region) and RW→Store (within region, no cross-region transfers).</li>
   </ul>
 </div>
 
@@ -118,9 +118,9 @@
     </div>
     <div class="cell">
       <div class="cell-dist">0 / 30 / 70</div>
-      <div class="cell-margin" style="color:#c0392b;">€+7,420</div>
+      <div class="cell-margin" style="color:#1a8a4a;">€+7,420</div>
       <div class="cell-margin-pct">+29.0% of revenue</div>
-      <div class="bar-track"><div class="bar-fill" style="width:7%;background:#c0392b;"></div></div>
+      <div class="bar-track"><div class="bar-fill" style="width:96%;background:#1a8a4a;"></div></div>
       <div class="cell-row">
         <span class="lbl">Sell-thru</span>
         <span class="val" style="color:#1a8a4a;font-weight:700;">98.5%</span>
@@ -142,9 +142,9 @@
     </div>
     <div class="cell">
       <div class="cell-dist">30 / 30 / 40</div>
-      <div class="cell-margin" style="color:#c0392b;">€+7,400</div>
+      <div class="cell-margin" style="color:#1a8a4a;">€+7,400</div>
       <div class="cell-margin-pct">+28.9% of revenue</div>
-      <div class="bar-track"><div class="bar-fill" style="width:2%;background:#c0392b;"></div></div>
+      <div class="bar-track"><div class="bar-fill" style="width:96%;background:#1a8a4a;"></div></div>
       <div class="cell-row">
         <span class="lbl">Sell-thru</span>
         <span class="val" style="color:#1a8a4a;font-weight:700;">98.5%</span>
@@ -173,74 +173,74 @@
       <div class="cells">
     <div class="cell">
       <div class="cell-dist">0 / 0 / 100</div>
-      <div class="cell-margin" style="color:#1a8a4a;">€+7,800</div>
-      <div class="cell-margin-pct">+30.0% of revenue</div>
-      <div class="bar-track"><div class="bar-fill" style="width:100%;background:#1a8a4a;"></div></div>
+      <div class="cell-margin" style="color:#f1c40f;">€+2,600</div>
+      <div class="cell-margin-pct">+12.5% of revenue</div>
+      <div class="bar-track"><div class="bar-fill" style="width:50%;background:#f1c40f;"></div></div>
       <div class="cell-row">
         <span class="lbl">Sell-thru</span>
-        <span class="val" style="color:#1a8a4a;font-weight:700;">100.0%</span>
+        <span class="val" style="color:#e67e22;font-weight:700;">80.0%</span>
       </div>
       <div class="cell-row">
         <span class="lbl">Service A</span>
-        <span class="val" style="color:#1a8a4a;font-weight:600;">100.0%</span>
+        <span class="val" style="color:#c0392b;font-weight:600;">71.4%</span>
       </div>
       <div class="cell-row">
         <span class="lbl">Service B</span>
         <span class="val" style="color:#1a8a4a;font-weight:600;">100.0%</span>
       </div>
       <div class="cell-row dim">
-        <span class="lbl">Sales</span><span class="val">2,600</span>
+        <span class="lbl">Sales</span><span class="val">2,080</span>
       </div>
       <div class="cell-row dim">
-        <span class="lbl">Missed</span><span class="val">0</span>
+        <span class="lbl">Missed</span><span class="val">520</span>
       </div>
     </div>
     <div class="cell">
       <div class="cell-dist">0 / 30 / 70</div>
-      <div class="cell-margin" style="color:#c0392b;">€+7,450</div>
-      <div class="cell-margin-pct">+29.0% of revenue</div>
-      <div class="bar-track"><div class="bar-fill" style="width:15%;background:#c0392b;"></div></div>
+      <div class="cell-margin" style="color:#f1c40f;">€+2,600</div>
+      <div class="cell-margin-pct">+12.5% of revenue</div>
+      <div class="bar-track"><div class="bar-fill" style="width:50%;background:#f1c40f;"></div></div>
       <div class="cell-row">
         <span class="lbl">Sell-thru</span>
-        <span class="val" style="color:#1a8a4a;font-weight:700;">98.7%</span>
+        <span class="val" style="color:#e67e22;font-weight:700;">80.0%</span>
       </div>
       <div class="cell-row">
         <span class="lbl">Service A</span>
-        <span class="val" style="color:#1a8a4a;font-weight:600;">99.4%</span>
+        <span class="val" style="color:#c0392b;font-weight:600;">71.4%</span>
       </div>
       <div class="cell-row">
         <span class="lbl">Service B</span>
-        <span class="val" style="color:#1a8a4a;font-weight:600;">96.9%</span>
+        <span class="val" style="color:#1a8a4a;font-weight:600;">100.0%</span>
       </div>
       <div class="cell-row dim">
-        <span class="lbl">Sales</span><span class="val">2,565</span>
+        <span class="lbl">Sales</span><span class="val">2,080</span>
       </div>
       <div class="cell-row dim">
-        <span class="lbl">Missed</span><span class="val">35</span>
+        <span class="lbl">Missed</span><span class="val">520</span>
       </div>
     </div>
     <div class="cell">
       <div class="cell-dist">30 / 30 / 40</div>
-      <div class="cell-margin" style="color:#c0392b;">€+7,390</div>
-      <div class="cell-margin-pct">+28.9% of revenue</div>
-      <div class="bar-track"><div class="bar-fill" style="width:0%;background:#c0392b;"></div></div>
+      <div class="cell-margin" style="color:#1a8a4a;">€+6,320</div>
+      <div class="cell-margin-pct">+25.8% of revenue</div>
+      <div class="bar-track"><div class="bar-fill" style="width:86%;background:#1a8a4a;"></div></div>
       <div class="cell-row">
         <span class="lbl">Sell-thru</span>
-        <span class="val" style="color:#1a8a4a;font-weight:700;">98.4%</span>
+        <span class="val" style="color:#e67e22;font-weight:700;">94.3%</span>
       </div>
       <div class="cell-row">
         <span class="lbl">Service A</span>
-        <span class="val" style="color:#1a8a4a;font-weight:600;">99.8%</span>
+        <span class="val" style="color:#e67e22;font-weight:600;">92.9%</span>
       </div>
       <div class="cell-row">
         <span class="lbl">Service B</span>
-        <span class="val" style="color:#1a8a4a;font-weight:600;">95.1%</span>
+        <span class="val" style="color:#1a8a4a;font-weight:600;">97.7%</span>
       </div>
       <div class="cell-row dim">
-        <span class="lbl">Sales</span><span class="val">2,559</span>
+        <span class="lbl">Sales</span><span class="val">2,452</span>
       </div>
       <div class="cell-row dim">
-        <span class="lbl">Missed</span><span class="val">41</span>
+        <span class="lbl">Missed</span><span class="val">148</span>
       </div>
     </div></div>
     </div>
@@ -252,74 +252,74 @@
       <div class="cells">
     <div class="cell">
       <div class="cell-dist">0 / 0 / 100</div>
-      <div class="cell-margin" style="color:#1a8a4a;">€+7,800</div>
-      <div class="cell-margin-pct">+30.0% of revenue</div>
-      <div class="bar-track"><div class="bar-fill" style="width:100%;background:#1a8a4a;"></div></div>
+      <div class="cell-margin" style="color:#c0392b;">€-2,600</div>
+      <div class="cell-margin-pct">-16.7% of revenue</div>
+      <div class="bar-track"><div class="bar-fill" style="width:0%;background:#c0392b;"></div></div>
       <div class="cell-row">
         <span class="lbl">Sell-thru</span>
-        <span class="val" style="color:#1a8a4a;font-weight:700;">100.0%</span>
+        <span class="val" style="color:#c0392b;font-weight:700;">60.0%</span>
       </div>
       <div class="cell-row">
         <span class="lbl">Service A</span>
-        <span class="val" style="color:#1a8a4a;font-weight:600;">100.0%</span>
+        <span class="val" style="color:#c0392b;font-weight:600;">55.6%</span>
       </div>
       <div class="cell-row">
         <span class="lbl">Service B</span>
         <span class="val" style="color:#1a8a4a;font-weight:600;">100.0%</span>
       </div>
       <div class="cell-row dim">
-        <span class="lbl">Sales</span><span class="val">2,600</span>
+        <span class="lbl">Sales</span><span class="val">1,560</span>
       </div>
       <div class="cell-row dim">
-        <span class="lbl">Missed</span><span class="val">0</span>
+        <span class="lbl">Missed</span><span class="val">1,040</span>
       </div>
     </div>
     <div class="cell">
       <div class="cell-dist">0 / 30 / 70</div>
-      <div class="cell-margin" style="color:#c0392b;">€+7,540</div>
-      <div class="cell-margin-pct">+29.3% of revenue</div>
-      <div class="bar-track"><div class="bar-fill" style="width:37%;background:#c0392b;"></div></div>
+      <div class="cell-margin" style="color:#c0392b;">€-2,600</div>
+      <div class="cell-margin-pct">-16.7% of revenue</div>
+      <div class="bar-track"><div class="bar-fill" style="width:0%;background:#c0392b;"></div></div>
       <div class="cell-row">
         <span class="lbl">Sell-thru</span>
-        <span class="val" style="color:#1a8a4a;font-weight:700;">99.0%</span>
+        <span class="val" style="color:#c0392b;font-weight:700;">60.0%</span>
       </div>
       <div class="cell-row">
         <span class="lbl">Service A</span>
-        <span class="val" style="color:#1a8a4a;font-weight:600;">99.6%</span>
+        <span class="val" style="color:#c0392b;font-weight:600;">55.6%</span>
       </div>
       <div class="cell-row">
         <span class="lbl">Service B</span>
-        <span class="val" style="color:#e67e22;font-weight:600;">93.5%</span>
+        <span class="val" style="color:#1a8a4a;font-weight:600;">100.0%</span>
       </div>
       <div class="cell-row dim">
-        <span class="lbl">Sales</span><span class="val">2,574</span>
+        <span class="lbl">Sales</span><span class="val">1,560</span>
       </div>
       <div class="cell-row dim">
-        <span class="lbl">Missed</span><span class="val">26</span>
+        <span class="lbl">Missed</span><span class="val">1,040</span>
       </div>
     </div>
     <div class="cell">
       <div class="cell-dist">30 / 30 / 40</div>
-      <div class="cell-margin" style="color:#c0392b;">€+7,490</div>
-      <div class="cell-margin-pct">+29.2% of revenue</div>
-      <div class="bar-track"><div class="bar-fill" style="width:24%;background:#c0392b;"></div></div>
+      <div class="cell-margin" style="color:#c0392b;">€+1,300</div>
+      <div class="cell-margin-pct">+6.7% of revenue</div>
+      <div class="bar-track"><div class="bar-fill" style="width:38%;background:#c0392b;"></div></div>
       <div class="cell-row">
         <span class="lbl">Sell-thru</span>
-        <span class="val" style="color:#1a8a4a;font-weight:700;">98.8%</span>
+        <span class="val" style="color:#c0392b;font-weight:700;">75.0%</span>
       </div>
       <div class="cell-row">
         <span class="lbl">Service A</span>
-        <span class="val" style="color:#1a8a4a;font-weight:600;">100.0%</span>
+        <span class="val" style="color:#c0392b;font-weight:600;">72.2%</span>
       </div>
       <div class="cell-row">
         <span class="lbl">Service B</span>
-        <span class="val" style="color:#e67e22;font-weight:600;">88.1%</span>
+        <span class="val" style="color:#1a8a4a;font-weight:600;">100.0%</span>
       </div>
       <div class="cell-row dim">
-        <span class="lbl">Sales</span><span class="val">2,569</span>
+        <span class="lbl">Sales</span><span class="val">1,950</span>
       </div>
       <div class="cell-row dim">
-        <span class="lbl">Missed</span><span class="val">31</span>
+        <span class="lbl">Missed</span><span class="val">650</span>
       </div>
     </div></div>
     </div>
@@ -334,44 +334,44 @@
       <div class="mb-val" style="color:#1a8a4a;">€+7,800</div>
     </div>
     <div class="mb-row">
-      <div class="mb-lbl">70/30 &middot; 0 / 0 / 100</div>
-      <div class="mb-track"><div class="mb-fill" style="width:100%;background:#1a8a4a;"></div></div>
-      <div class="mb-val" style="color:#1a8a4a;">€+7,800</div>
-    </div>
-    <div class="mb-row">
-      <div class="mb-lbl">90/10 &middot; 0 / 0 / 100</div>
-      <div class="mb-track"><div class="mb-fill" style="width:100%;background:#1a8a4a;"></div></div>
-      <div class="mb-val" style="color:#1a8a4a;">€+7,800</div>
-    </div>
-    <div class="mb-row">
-      <div class="mb-lbl">90/10 &middot; 0 / 30 / 70</div>
-      <div class="mb-track"><div class="mb-fill" style="width:37%;background:#c0392b;"></div></div>
-      <div class="mb-val" style="color:#c0392b;">€+7,540</div>
-    </div>
-    <div class="mb-row">
-      <div class="mb-lbl">90/10 &middot; 30 / 30 / 40</div>
-      <div class="mb-track"><div class="mb-fill" style="width:24%;background:#c0392b;"></div></div>
-      <div class="mb-val" style="color:#c0392b;">€+7,490</div>
-    </div>
-    <div class="mb-row">
-      <div class="mb-lbl">70/30 &middot; 0 / 30 / 70</div>
-      <div class="mb-track"><div class="mb-fill" style="width:15%;background:#c0392b;"></div></div>
-      <div class="mb-val" style="color:#c0392b;">€+7,450</div>
-    </div>
-    <div class="mb-row">
       <div class="mb-lbl">50/50 &middot; 0 / 30 / 70</div>
-      <div class="mb-track"><div class="mb-fill" style="width:7%;background:#c0392b;"></div></div>
-      <div class="mb-val" style="color:#c0392b;">€+7,420</div>
+      <div class="mb-track"><div class="mb-fill" style="width:96%;background:#1a8a4a;"></div></div>
+      <div class="mb-val" style="color:#1a8a4a;">€+7,420</div>
     </div>
     <div class="mb-row">
       <div class="mb-lbl">50/50 &middot; 30 / 30 / 40</div>
-      <div class="mb-track"><div class="mb-fill" style="width:2%;background:#c0392b;"></div></div>
-      <div class="mb-val" style="color:#c0392b;">€+7,400</div>
+      <div class="mb-track"><div class="mb-fill" style="width:96%;background:#1a8a4a;"></div></div>
+      <div class="mb-val" style="color:#1a8a4a;">€+7,400</div>
     </div>
     <div class="mb-row">
       <div class="mb-lbl">70/30 &middot; 30 / 30 / 40</div>
+      <div class="mb-track"><div class="mb-fill" style="width:86%;background:#1a8a4a;"></div></div>
+      <div class="mb-val" style="color:#1a8a4a;">€+6,320</div>
+    </div>
+    <div class="mb-row">
+      <div class="mb-lbl">70/30 &middot; 0 / 0 / 100</div>
+      <div class="mb-track"><div class="mb-fill" style="width:50%;background:#f1c40f;"></div></div>
+      <div class="mb-val" style="color:#f1c40f;">€+2,600</div>
+    </div>
+    <div class="mb-row">
+      <div class="mb-lbl">70/30 &middot; 0 / 30 / 70</div>
+      <div class="mb-track"><div class="mb-fill" style="width:50%;background:#f1c40f;"></div></div>
+      <div class="mb-val" style="color:#f1c40f;">€+2,600</div>
+    </div>
+    <div class="mb-row">
+      <div class="mb-lbl">90/10 &middot; 30 / 30 / 40</div>
+      <div class="mb-track"><div class="mb-fill" style="width:38%;background:#c0392b;"></div></div>
+      <div class="mb-val" style="color:#c0392b;">€+1,300</div>
+    </div>
+    <div class="mb-row">
+      <div class="mb-lbl">90/10 &middot; 0 / 0 / 100</div>
       <div class="mb-track"><div class="mb-fill" style="width:0%;background:#c0392b;"></div></div>
-      <div class="mb-val" style="color:#c0392b;">€+7,390</div>
+      <div class="mb-val" style="color:#c0392b;">€-2,600</div>
+    </div>
+    <div class="mb-row">
+      <div class="mb-lbl">90/10 &middot; 0 / 30 / 70</div>
+      <div class="mb-track"><div class="mb-fill" style="width:0%;background:#c0392b;"></div></div>
+      <div class="mb-val" style="color:#c0392b;">€-2,600</div>
     </div>
   </div>
   <div class="chart">
@@ -427,8 +427,8 @@
       <div class="sb-pair">
         <div class="sb-bar">
           <div class="sb-cap">A</div>
-          <div class="sb-track"><div class="sb-fill" style="width:100%;background:#1a8a4a;"></div></div>
-          <div class="sb-val">100.0%</div>
+          <div class="sb-track"><div class="sb-fill" style="width:71%;background:#c0392b;"></div></div>
+          <div class="sb-val">71.4%</div>
         </div>
         <div class="sb-bar">
           <div class="sb-cap">B</div>
@@ -442,13 +442,13 @@
       <div class="sb-pair">
         <div class="sb-bar">
           <div class="sb-cap">A</div>
-          <div class="sb-track"><div class="sb-fill" style="width:99%;background:#1a8a4a;"></div></div>
-          <div class="sb-val">99.4%</div>
+          <div class="sb-track"><div class="sb-fill" style="width:71%;background:#c0392b;"></div></div>
+          <div class="sb-val">71.4%</div>
         </div>
         <div class="sb-bar">
           <div class="sb-cap">B</div>
-          <div class="sb-track"><div class="sb-fill" style="width:97%;background:#1a8a4a;"></div></div>
-          <div class="sb-val">96.9%</div>
+          <div class="sb-track"><div class="sb-fill" style="width:100%;background:#1a8a4a;"></div></div>
+          <div class="sb-val">100.0%</div>
         </div>
       </div>
     </div>
@@ -457,13 +457,13 @@
       <div class="sb-pair">
         <div class="sb-bar">
           <div class="sb-cap">A</div>
-          <div class="sb-track"><div class="sb-fill" style="width:100%;background:#1a8a4a;"></div></div>
-          <div class="sb-val">99.8%</div>
+          <div class="sb-track"><div class="sb-fill" style="width:93%;background:#e67e22;"></div></div>
+          <div class="sb-val">92.9%</div>
         </div>
         <div class="sb-bar">
           <div class="sb-cap">B</div>
-          <div class="sb-track"><div class="sb-fill" style="width:95%;background:#1a8a4a;"></div></div>
-          <div class="sb-val">95.1%</div>
+          <div class="sb-track"><div class="sb-fill" style="width:98%;background:#1a8a4a;"></div></div>
+          <div class="sb-val">97.7%</div>
         </div>
       </div>
     </div>
@@ -472,8 +472,8 @@
       <div class="sb-pair">
         <div class="sb-bar">
           <div class="sb-cap">A</div>
-          <div class="sb-track"><div class="sb-fill" style="width:100%;background:#1a8a4a;"></div></div>
-          <div class="sb-val">100.0%</div>
+          <div class="sb-track"><div class="sb-fill" style="width:56%;background:#c0392b;"></div></div>
+          <div class="sb-val">55.6%</div>
         </div>
         <div class="sb-bar">
           <div class="sb-cap">B</div>
@@ -487,13 +487,13 @@
       <div class="sb-pair">
         <div class="sb-bar">
           <div class="sb-cap">A</div>
-          <div class="sb-track"><div class="sb-fill" style="width:100%;background:#1a8a4a;"></div></div>
-          <div class="sb-val">99.6%</div>
+          <div class="sb-track"><div class="sb-fill" style="width:56%;background:#c0392b;"></div></div>
+          <div class="sb-val">55.6%</div>
         </div>
         <div class="sb-bar">
           <div class="sb-cap">B</div>
-          <div class="sb-track"><div class="sb-fill" style="width:93%;background:#e67e22;"></div></div>
-          <div class="sb-val">93.5%</div>
+          <div class="sb-track"><div class="sb-fill" style="width:100%;background:#1a8a4a;"></div></div>
+          <div class="sb-val">100.0%</div>
         </div>
       </div>
     </div>
@@ -502,13 +502,13 @@
       <div class="sb-pair">
         <div class="sb-bar">
           <div class="sb-cap">A</div>
-          <div class="sb-track"><div class="sb-fill" style="width:100%;background:#1a8a4a;"></div></div>
-          <div class="sb-val">100.0%</div>
+          <div class="sb-track"><div class="sb-fill" style="width:72%;background:#c0392b;"></div></div>
+          <div class="sb-val">72.2%</div>
         </div>
         <div class="sb-bar">
           <div class="sb-cap">B</div>
-          <div class="sb-track"><div class="sb-fill" style="width:88%;background:#e67e22;"></div></div>
-          <div class="sb-val">88.1%</div>
+          <div class="sb-track"><div class="sb-fill" style="width:100%;background:#1a8a4a;"></div></div>
+          <div class="sb-val">100.0%</div>
         </div>
       </div>
     </div>
@@ -518,8 +518,8 @@
 <div class="takeaway">
   <b>One-shot is where pre-positioning bites.</b> With no replenishment, the chain has 26 weeks to deliver units that already exist somewhere — so the only question is whether smart distribution can route stock to the right region in time.<br><br>
   <b>Best margin:</b> 50/50 · 0 / 0 / 100 → <b>€+7,800</b> (+30.0%); sell-through <b>100.0%</b>, service <b>100.0%</b>.<br>
-  <b>Worst margin:</b> 70/30 · 30 / 30 / 40 → <b>€+7,390</b>; service <b>98.4%</b>, Region B service <b>95.1%</b>.<br>
+  <b>Worst margin:</b> 90/10 · 0 / 0 / 100 → <b>€-2,600</b>; service <b>60.0%</b>, Region B service <b>100.0%</b>.<br>
   <b>Best sell-through:</b> 50/50 · 0 / 0 / 100 → <b>100.0%</b>.<br>
-  <b>Worst Region B service:</b> <b>88.1%</b> — the failure mode the slide is meant to show.
+  <b>Worst Region B service:</b> <b>97.7%</b> — the failure mode the slide is meant to show.
 </div>
 </body></html>
