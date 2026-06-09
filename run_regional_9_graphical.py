@@ -262,13 +262,14 @@ html = f"""<!doctype html>
 <div class="hyp">
   <h3>Hypotheses fixed across the 9 cells</h3>
   <ul>
-    <li><span style="background:#fff7e1;padding:2px 6px;border-radius:3px;font-weight:600;color:#9a6a00;">CORRECTED</span> <b>W0 stock split 50/50 between regions</b>: at W0 the operator does NOT yet know the demand split. RW init and store init are split evenly between Region A and B regardless of the slider's ground truth. At 90/10 split, A faces 2,340 demand with only 1,300 dedicated W0 units &mdash; the chain has to do the rest via replenishment + smart distribution.</li>
-    <li><b>Total demand identical</b>: 100 pcs/wk &times; 26 wks = <b>2,600 units</b> in every cell. The split slider only changes how those 2,600 are divided between Region A and B.</li>
-    <li><b>Right-sized chain</b>: initial stock equals (total LT + 1) &times; demand. The planner reaches steady state quickly and the supplier orders track weekly demand ~1-for-1 in balanced cases.</li>
-    <li><b>Margin differences are missed-sales differences + over-production cost</b>: each missed unit costs &minus;&euro;10 revenue; each over-produced unit costs +&euro;5 COGS.</li>
-    <li><b>Planner discovers the regional split at the first review</b> (week 1, since freq=1). It is locked from then on and never re-bases.</li>
-    <li><b>Smart distribution is on everywhere</b>: water-fills both CW&rarr;RW (prioritise starved region) and RW&rarr;Store (within region only &mdash; no cross-region transfers).</li>
-    <li><b>No production cap</b>: the chain produces freely. Tightening prod_cap or shrinking initial stock are the levers that would amplify differences between distributions.</li>
+    <li><b>Total demand 2,600 units</b>: flat 100 pcs/wk &times; 26 wks in every cell. The split slider only changes how those 2,600 are divided between Region A and B.</li>
+    <li><b>Right-sized chain</b>: initial stock = (total LT + 1) &times; demand = <b>1,400 units</b>. Enough buffer for the planner to reach steady state quickly when demand is balanced.</li>
+    <li><b>W0 stock split 50/50 between regions</b>: the operator pre-positions evenly because the regional split is not yet known at W0. The planner discovers the actual split at the first review (week 1) and the smart allocator then routes the CW pool to whichever region is starving.</li>
+    <li><b>Within each region, store stock is split by tier-bucket share</b>: 40% to the 5 high-selling stores, 46% to the 15 medium, 14% to the 30 small &mdash; tier-uniform within tier.</li>
+    <li><b>Strict regional isolation</b>: stock at RW A only feeds Region A's stores; same for B. Region B's surplus cannot rescue Region A.</li>
+    <li><b>Smart distribution on</b>: water-fills CW &rarr; RW (prioritise the starved region) and RW &rarr; Store (within region only).</li>
+    <li><b>No production cap</b>: the chain produces freely. Margin differences come from missed-sales revenue lost &minus;&euro;10/unit and any over-production cost +&euro;5/unit.</li>
+    <li><b>Planner discovers the regional split at the first review</b> and locks it. The forecast magnitude is the same in every cell (the planner's prior is 100/wk total).</li>
   </ul>
 </div>
 
@@ -286,10 +287,17 @@ html = f"""<!doctype html>
 </div>
 
 <div class="takeaway">
-  <b>Why 0/0/100 margins look similar across splits:</b> total demand is fixed at 2,600 and the chain produces at steady state ~100/wk regardless of split, so the only thing that varies is <b>where the missed units land</b>. At 50/50 the load is symmetric and nobody starves. At 70/30 and 90/10, Region B is starved <i>at its stores</i> from W0, but the chain has 13 weeks to refill it &mdash; with smart distribution catching the imbalance at the first review, most of the gap is recovered before the run ends. The 30/30/40 distribution wins at every skew because the CW + RW stock gives the smart allocator material to redirect once it knows the split.<br><br>
-  <b>Best margin:</b> {best['split_lbl']} &middot; {best['dist']} &rarr; <b>€{best['margin']:+,.0f}</b> ({best['margin_pct_rev']:+.1f}%).<br>
-  <b>Worst margin:</b> {worst['split_lbl']} &middot; {worst['dist']} &rarr; <b>€{worst['margin']:+,.0f}</b>.<br>
-  <b>Spread across the 9 cells: €{spread:,.0f}.</b> Modest in absolute terms, but Region B's service rate falls as low as {min(r['svc_b'] for r in results):.1f}% on the worst cell &mdash; a meaningful retail KPI even when total margin barely moves.
+  <b>The 0/0/100 column collapses at skewed splits.</b> All 1,400 W0 units are pushed to stores and split 50/50 between regions because the operator does not yet know the demand share. Once the planner discovers it at the first review, smart distribution cannot reroute anything &mdash; there is no CW or RW pool left, and the strict regional isolation rule prevents B's surplus from rescuing A:
+  <ul style="margin:6px 0 10px 18px;padding:0;">
+    <li><b>50/50</b>: each region's 700 units exactly cover its 1,300 demand once the supplier replenishes &mdash; 99% service.</li>
+    <li><b>70/30</b>: Region A's 700 W0 units face 1,820 demand. The supplier ships 1,120 more across 26 wks but the 13-week chain means A misses the first stockout bursts; A service drops to <b>82%</b>.</li>
+    <li><b>90/10</b>: A faces 2,340 demand on 700 W0 units. Even with full supplier output, the 13-wk replenishment lag strands A &mdash; A service <b>31%</b>, B sits on growing surplus at 100% service. Margin collapses to <b>&euro;{worst['margin']:+,.0f}</b>.</li>
+  </ul>
+  <b>The 0/30/70 column behaves nearly identically.</b> The 30% at RW is also split 50/50 between regions and locked in by isolation; only the form of A's W0 stock changes, not its quantity.<br><br>
+  <b>The 30/30/40 column is the only one with a CW pool to redirect.</b> 30% (420 units) sits centrally at W0 and the smart allocator pushes it toward A once the skew is discovered. That single mechanism lifts A's service from 31% to 69% at 90/10 and recovers most of the margin.<br><br>
+  <b>Best margin:</b> {best['split_lbl']} &middot; {best['dist']} &rarr; <b>&euro;{best['margin']:+,.0f}</b> ({best['margin_pct_rev']:+.1f}%).<br>
+  <b>Worst margin:</b> {worst['split_lbl']} &middot; {worst['dist']} &rarr; <b>&euro;{worst['margin']:+,.0f}</b>.<br>
+  <b>Spread across the 9 cells: &euro;{spread:,.0f}.</b> Region A's service falls to {min(r['svc_a'] for r in results):.1f}% on the worst cell; the bigger the skew, the bigger the gain from holding stock centrally.
 </div>
 
 </body></html>"""

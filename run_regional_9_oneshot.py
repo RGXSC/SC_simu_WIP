@@ -230,13 +230,13 @@ html = f"""<!doctype html>
 <div class="hyp">
   <h3>Hypotheses fixed across the 9 cells</h3>
   <ul>
-    <li><span class="new">CORRECTED</span> <b>W0 stock split 50/50 between regions</b>: at W0 the operator does NOT yet know the demand split — the planner only discovers it at the first review. So both RW init and store init are divided evenly between Region A and Region B regardless of the slider's ground truth. This is the lever that exposes A-side starvation at skewed splits: 90/10 means A faces 2,340 demand with only 1,300 units of dedicated W0 stock.</li>
-    <li><span class="new">NEW</span> <b>One-shot product</b>: the lifetime production cap is set to <b>2,600 = initial stock</b>. Supplier orders are forced to zero from W1 onwards. Whatever the chain holds at week 0 is all it will ever have.</li>
-    <li><span class="new">NEW</span> <b>Total LT shortened to 5 wk (Agile)</b>: upstream LT is dead weight here (nothing is produced), so we leave only the distribution legs (CW→RW=1, RW→Store=1) plus a token mat/semi/fp=1 each.</li>
-    <li><b>Total demand identical</b>: 100 pcs/wk × 26 wks = <b>2,600 units</b> in every cell. The split slider only changes how those 2,600 are divided between Region A and B.</li>
-    <li><b>Smart distribution is on everywhere</b>: water-fills CW→RW (prioritise starved region) and RW→Store (within region, no cross-region transfers). Once the planner discovers the split, it routes the CW pool to whoever is short — but it cannot reroute units already at stores or already in an RW.</li>
-    <li><b>Strict regional isolation</b>: stock at RW A only feeds Region A's stores; same for B. So if Region B has surplus, it can't rescue Region A.</li>
-    <li><b>Planner discovers the regional split at the first review</b> (week 1, since freq=1). It is locked from then on and never re-bases.</li>
+    <li><b>One-shot product</b>: lifetime production capped at <b>2,600 units = initial stock</b>. No supplier orders fire after W0. Whatever the chain holds at week 0 is all it will ever have.</li>
+    <li><b>Total demand 2,600 units</b>: flat 100 pcs/wk &times; 26 wks in every cell. The split slider only changes how those 2,600 are divided between Region A and B.</li>
+    <li><b>W0 stock split 50/50 between regions</b>: the operator pre-positions evenly because the regional demand split is not yet known at week 0. The planner discovers the actual split at the first review (week 1) and from then on the smart allocator routes the CW pool to whichever region is starving.</li>
+    <li><b>Within each region, store stock is split by tier-bucket share</b>: 40% to the 5 high-selling stores, 46% to the 15 medium, 14% to the 30 small &mdash; tier-uniform within tier. Standard operator heuristic: give the high-sellers more stock because they sell more.</li>
+    <li><b>Strict regional isolation</b>: stock at RW A only feeds Region A's stores; same for B. Region B's surplus cannot rescue Region A.</li>
+    <li><b>Smart distribution on</b>: water-fills CW &rarr; RW (prioritises the starved region) and RW &rarr; Store (within region only). Cannot reroute units already at stores or already at an RW.</li>
+    <li><b>Total chain LT 5 wk</b> (Agile defaults). Upstream LT is dead weight here (no production happens), so it matters only via the CW &rarr; RW &rarr; Store transit at the back end (2 wks).</li>
   </ul>
 </div>
 
@@ -254,11 +254,16 @@ html = f"""<!doctype html>
 </div>
 
 <div class="takeaway">
-  <b>One-shot is where pre-positioning bites.</b> With no replenishment, the chain has 26 weeks to deliver units that already exist somewhere — so the only question is whether smart distribution can route stock to the right region in time.<br><br>
-  <b>Best margin:</b> {best['split_lbl']} · {best['dist']} → <b>€{best['margin']:+,.0f}</b> ({best['margin_pct_rev']:+.1f}%); sell-through <b>{best['sell_through']:.1f}%</b>, service <b>{best['svc']:.1f}%</b>.<br>
-  <b>Worst margin:</b> {worst['split_lbl']} · {worst['dist']} → <b>€{worst['margin']:+,.0f}</b>; service <b>{worst['svc']:.1f}%</b>, Region B service <b>{worst['svc_b']:.1f}%</b>.<br>
-  <b>Best sell-through:</b> {best_st['split_lbl']} · {best_st['dist']} → <b>{best_st['sell_through']:.1f}%</b>.<br>
-  <b>Worst Region B service:</b> <b>{worst_b_svc:.1f}%</b> — the failure mode the slide is meant to show.
+  <b>The 0/0/100 column tells the W0-pre-positioning story.</b> All 2,600 units are pushed to stores from week 0, split 50/50 between regions because the demand split is unknown at W0. Once the run starts, no inter-region transfer is possible and no production fills the gap.
+  <ul style="margin:6px 0 10px 18px;padding:0;">
+    <li><b>At 50/50</b> demand: Region A sells 1,300 from its 1,300 store stock and Region B does the same &mdash; perfect match, 100% service.</li>
+    <li><b>At 70/30</b>: Region A has 1,300 units of stock but 1,820 units of demand &rarr; 520 units missed, A service <b>71.4%</b>. Region B has 1,300 units of stock for 780 units of demand &rarr; 520 units of stranded surplus, B service 100%. There is no CW or RW pool to redistribute, so B's surplus is unreachable.</li>
+    <li><b>At 90/10</b>: same dynamic, sharper &mdash; A faces 2,340 demand on 1,300 units, missing 1,040 (A service <b>55.6%</b>). Margin tips negative: <b>&euro;{worst['margin']:+,.0f}</b>.</li>
+  </ul>
+  <b>The 0/30/70 column behaves nearly identically</b> at skewed splits: stock placed at RW A or RW B (split 50/50 by hypothesis) is locked inside that region's chain. Only the 30/30/40 column has a CW pool, and that pool can flow to whichever region the planner discovers to be short.<br><br>
+  <b>Best margin:</b> {best['split_lbl']} &middot; {best['dist']} &rarr; <b>&euro;{best['margin']:+,.0f}</b> ({best['margin_pct_rev']:+.1f}%); service <b>{best['svc']:.1f}%</b>.<br>
+  <b>Worst margin:</b> {worst['split_lbl']} &middot; {worst['dist']} &rarr; <b>&euro;{worst['margin']:+,.0f}</b>; Region A service <b>{worst['svc_a']:.1f}%</b>.<br>
+  <b>30/30/40 wins at every skewed split</b> &mdash; the CW pool (30% of total stock = 780 units) is the only buffer the smart allocator can re-route once it learns the actual demand split.
 </div>
 </body></html>"""
 

@@ -25,28 +25,22 @@ st.title("\U0001F30D  Regional 2-RW Simulator")
 st.caption("Chain: Supplier → Material → Semi → FP → **CW → RW A / RW B → Stores**. "
            "Planner discovers the regional demand split at the first review.")
 
-with st.expander("ℹ️ How the W0 pre-positioning works", expanded=False):
+with st.expander("ℹ️ Model rules", expanded=False):
     st.markdown("""
-**W0 stock is split 50/50 between the two regions** — both RW init and store
-init — regardless of the demand-split slider. This reflects the operator's
-real-world position at week 0: they don't yet know the regional split. The
-planner only **discovers** the split at the first review (week = order
-frequency), and from then on the smart allocator routes the CW pool to the
-starved region.
+**W0 stock** is split 50/50 between Region A and Region B (both RW and stores)
+regardless of the demand-split slider. The operator does not yet know the
+regional split at week 0; the planner discovers it at the first review and
+the smart allocator routes the CW pool to whichever region is short from
+then on.
 
-So at **90/10 split + 0/0/100 distribution**, Region A's 50 stores hold only
-half the total store stock (1,300 units) but face 90% of the demand
-(2,340 units over 26 weeks). The chain has to refill A through the
-CW → RW → Store cascade, paying transit time. At one-shot (prod_cap = init)
-this is unrecoverable — A starves. With replenishment the chain catches up
-but at extreme skew the LT penalty remains visible.
+**Within each region, store stock is split by tier-bucket share** — 40% to
+the 5 high-selling stores, 46% to the 15 medium, 14% to the 30 small —
+and uniform within each tier. Per-week per-store demand follows the same
+15:6:1 weight ratio.
 
-**Within each region, store init is split by tier-bucket-share**: 40% to
-the 5 high-selling stores, 46% to the 15 medium, 14% to the 30 small. Each
-tier ends up with the same weeks-of-cover (assuming the planner's prior is
-even split). That's the operator's planning heuristic — give the
-high-sellers more stock because they sell more — and it's tier-uniform
-within each tier (no foreknowledge of per-store demand inside a tier).
+**Strict regional isolation**: stock at RW A only feeds Region A's stores;
+same for B. No cross-region transfers. The CW pool can flow to either
+region as the planner directs.
     """)
 
 # ── Defaults (session_state persistence) ─────────────────────────────────
