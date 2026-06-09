@@ -321,6 +321,156 @@ if r.get('f_seasonal_locked') is not None:
 if _locks:
     st.caption("_Planner locked at first review:_ " + " · ".join(_locks))
 
+# ── Chain diagram (2-RW topology) ──────────────────────────────────────────
+st.markdown("### \U0001F3ED Chain diagram")
+
+_set("reg_diag_week", st.session_state.reg_weeks)
+max_w = st.session_state.reg_weeks
+if st.session_state.reg_diag_week > max_w:
+    st.session_state.reg_diag_week = max_w
+
+# Week scrubber: prev / slider / next / end
+dc1, dc2, dc3, dc4, dc5 = st.columns([1, 1, 6, 1, 1])
+with dc1:
+    if st.button("⏮ W0", key="diag_w0", use_container_width=True):
+        st.session_state.reg_diag_week = 0
+with dc2:
+    if st.button("◀ −1", key="diag_prev", use_container_width=True,
+                 disabled=st.session_state.reg_diag_week <= 0):
+        st.session_state.reg_diag_week -= 1
+with dc3:
+    st.session_state.reg_diag_week = st.slider(
+        "Week to display", 0, max_w, st.session_state.reg_diag_week,
+        key="w_diag_slider", label_visibility="collapsed")
+with dc4:
+    if st.button("+1 ▶", key="diag_next", use_container_width=True,
+                 disabled=st.session_state.reg_diag_week >= max_w):
+        st.session_state.reg_diag_week += 1
+with dc5:
+    if st.button(f"W{max_w} ⏭", key="diag_end", use_container_width=True):
+        st.session_state.reg_diag_week = max_w
+
+_st = r['states'][st.session_state.reg_diag_week]
+
+def _box(title, value, sub="", colour="#1a2a40", bg="#fff", w=92):
+    return (
+        f'<div style="background:{bg};border:1px solid #e6ecf2;border-radius:6px;'
+        f'padding:8px 10px;min-width:{w}px;text-align:center;'
+        f'box-shadow:0 1px 1px rgba(0,0,0,.04);">'
+        f'<div style="font-size:9.5px;text-transform:uppercase;letter-spacing:.4px;'
+        f'color:#5a6a80;font-weight:600;">{title}</div>'
+        f'<div style="font-size:18px;font-weight:700;color:{colour};line-height:1.1;margin-top:3px;">'
+        f'{value}</div>'
+        f'<div style="font-size:9.5px;color:#7a8a9e;margin-top:2px;">{sub}</div></div>'
+    )
+
+def _arrow(label_top="", label_bot=""):
+    return (
+        f'<div style="display:flex;flex-direction:column;align-items:center;'
+        f'justify-content:center;color:#7a8a9e;font-size:9.5px;padding:0 4px;">'
+        f'<div>{label_top}</div>'
+        f'<div style="font-size:18px;color:#1a2a40;line-height:1;">→</div>'
+        f'<div>{label_bot}</div></div>'
+    )
+
+cw_v       = int(round(_st['cw']))
+rw_a_v     = int(round(_st['rw_a']))
+rw_b_v     = int(round(_st['rw_b']))
+stores_a_v = int(sum(_st['stores_a']))
+stores_b_v = int(sum(_st['stores_b']))
+raw_v      = int(round(_st.get('raw_mat', 0)))
+semi_v     = int(round(_st.get('semi', 0)))
+pb_v       = int(round(_st.get('pb', 0)))
+mat_pipe_v = int(round(sum(_st.get('mat_pipe', []))))
+semi_pipe_v= int(round(sum(_st.get('semi_pipe', []))))
+fp_pipe_v  = int(round(sum(_st.get('fp_pipe', []))))
+cwrw_a_v   = int(round(sum(_st.get('cw_rw_pipe_a', []))))
+cwrw_b_v   = int(round(sum(_st.get('cw_rw_pipe_b', []))))
+dist_a_v   = int(round(_st.get('dist_pipe_a_sum', 0)))
+dist_b_v   = int(round(_st.get('dist_pipe_b_sum', 0)))
+ship_a_v   = int(round(_st.get('ship_backlog_a', 0)))
+ship_b_v   = int(round(_st.get('ship_backlog_b', 0)))
+
+dem_a_v    = _st.get('demand_a', 0); dem_b_v = _st.get('demand_b', 0)
+sal_a_v    = _st.get('sales_a', 0);  sal_b_v = _st.get('sales_b', 0)
+mis_a_v    = _st.get('missed_a', 0); mis_b_v = _st.get('missed_b', 0)
+
+N = st.session_state.reg_n_per_region
+
+# Upstream chain (single track until CW)
+upstream = (
+    _box("Supplier", f"pb {pb_v}", "backlog → produce") +
+    _arrow() +
+    _box(f"Mat ({st.session_state.reg_mat_lt}wk)", f"{raw_v + mat_pipe_v}",
+         f"buf {raw_v} · pipe {mat_pipe_v}") +
+    _arrow() +
+    _box(f"Semi ({st.session_state.reg_semi_lt}wk)", f"{semi_v + semi_pipe_v}",
+         f"buf {semi_v} · pipe {semi_pipe_v}") +
+    _arrow() +
+    _box(f"FP ({st.session_state.reg_fp_lt}wk)", f"{fp_pipe_v}",
+         f"pipe {fp_pipe_v}") +
+    _arrow() +
+    _box("CW", f"{cw_v}", "central pool", colour="#1a2a40", bg="#eef2f6")
+)
+
+# Region A branch
+region_a_html = (
+    _box(f"CW→RW A ({st.session_state.reg_cw_rw_lt}wk)", f"{cwrw_a_v}",
+         f"pipe · ord {ship_a_v}", bg="#f3f7fc") +
+    _arrow() +
+    _box("RW A", f"{rw_a_v}", "regional pool", colour="#2c5f8a", bg="#e8eff7") +
+    _arrow() +
+    _box(f"RW→Store A ({st.session_state.reg_rw_store_lt}wk)", f"{dist_a_v}",
+         "pipe", bg="#f3f7fc") +
+    _arrow() +
+    _box(f"Stores A (×{N})", f"{stores_a_v}",
+         f"dem {dem_a_v} · sold {sal_a_v}" + (f" · LOST {mis_a_v}" if mis_a_v else ""),
+         colour="#2c5f8a",
+         bg="#fef0f0" if mis_a_v else "#e8eff7")
+)
+
+# Region B branch
+region_b_html = (
+    _box(f"CW→RW B ({st.session_state.reg_cw_rw_lt}wk)", f"{cwrw_b_v}",
+         f"pipe · ord {ship_b_v}", bg="#fcf6ef") +
+    _arrow() +
+    _box("RW B", f"{rw_b_v}", "regional pool", colour="#c97a2c", bg="#fbf1e6") +
+    _arrow() +
+    _box(f"RW→Store B ({st.session_state.reg_rw_store_lt}wk)", f"{dist_b_v}",
+         "pipe", bg="#fcf6ef") +
+    _arrow() +
+    _box(f"Stores B (×{N})", f"{stores_b_v}",
+         f"dem {dem_b_v} · sold {sal_b_v}" + (f" · LOST {mis_b_v}" if mis_b_v else ""),
+         colour="#c97a2c",
+         bg="#fef0f0" if mis_b_v else "#fbf1e6")
+)
+
+diagram_html = (
+    f'<div style="overflow-x:auto;padding:12px 0;background:#fafbfc;'
+    f'border-radius:8px;border:1px solid #ecf0f4;">'
+    # Row 1: upstream chain
+    f'<div style="display:flex;align-items:stretch;gap:0;padding:0 12px 14px;'
+    f'border-bottom:1px dashed #d8e0e8;justify-content:flex-start;min-width:780px;">'
+    f'{upstream}'
+    f'</div>'
+    # Row 2: two regional branches sharing the CW
+    f'<div style="display:grid;grid-template-columns:auto 1fr;gap:14px 18px;'
+    f'padding:14px 12px;min-width:780px;align-items:center;">'
+    f'<div style="font-weight:700;color:#2c5f8a;font-size:12px;">→ Region A</div>'
+    f'<div style="display:flex;align-items:stretch;gap:0;">{region_a_html}</div>'
+    f'<div style="font-weight:700;color:#c97a2c;font-size:12px;">→ Region B</div>'
+    f'<div style="display:flex;align-items:stretch;gap:0;">{region_b_html}</div>'
+    f'</div></div>'
+)
+
+st.markdown(
+    f'<div style="font-size:11.5px;color:#5a6a80;margin-bottom:6px;">'
+    f'Showing <b>week {st.session_state.reg_diag_week}</b> '
+    f'(end-of-week stock & in-transit). Sales/demand shown for stores.'
+    f'</div>{diagram_html}',
+    unsafe_allow_html=True,
+)
+
 # ── Weekly chart: aggregate demand vs sales ────────────────────────────────
 st.markdown("### \U0001F4C8 Weekly demand vs sales (aggregate)")
 chart_data = pd.DataFrame({

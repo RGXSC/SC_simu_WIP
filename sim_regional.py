@@ -292,6 +292,13 @@ def run_simulation_regional(
     states = []
     states.append({
         'week': 0, 'cw': cw, 'rw_a': rw_a, 'rw_b': rw_b,
+        'raw_mat': raw_mat, 'semi': semi,
+        'mat_pipe': list(mat_pipe), 'semi_pipe': list(semi_pipe),
+        'fp_pipe': list(fp_pipe),
+        'cw_rw_pipe_a': list(cw_rw_pipe_a), 'cw_rw_pipe_b': list(cw_rw_pipe_b),
+        'dist_pipe_a_sum': 0.0, 'dist_pipe_b_sum': 0.0,
+        'pb': 0.0, 'semi_backlog': 0.0, 'fp_backlog': 0.0,
+        'ship_backlog_a': 0.0, 'ship_backlog_b': 0.0,
         'stores_a': stores_a.tolist(), 'stores_b': stores_b.tolist(),
         'sales_a': 0, 'sales_b': 0, 'missed_a': 0, 'missed_b': 0,
         'demand_a': 0, 'demand_b': 0, 'sup_order': 0,
@@ -574,6 +581,16 @@ def run_simulation_regional(
 
         states.append({
             'week': w, 'cw': cw, 'rw_a': rw_a, 'rw_b': rw_b,
+            'raw_mat': raw_mat, 'semi': semi,
+            'mat_pipe':       list(mat_pipe),
+            'semi_pipe':      list(semi_pipe),
+            'fp_pipe':        list(fp_pipe),
+            'cw_rw_pipe_a':   list(cw_rw_pipe_a),
+            'cw_rw_pipe_b':   list(cw_rw_pipe_b),
+            'dist_pipe_a_sum': float(sum(sum(dp) for dp in dist_pipes_a)),
+            'dist_pipe_b_sum': float(sum(sum(dp) for dp in dist_pipes_b)),
+            'pb': pb, 'semi_backlog': semi_backlog, 'fp_backlog': fp_backlog,
+            'ship_backlog_a': ship_backlog_a, 'ship_backlog_b': ship_backlog_b,
             'stores_a': stores_a.tolist(), 'stores_b': stores_b.tolist(),
             'sales_a': sales_a, 'sales_b': sales_b,
             'missed_a': missed_a, 'missed_b': missed_b,
