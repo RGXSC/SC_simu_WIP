@@ -17,8 +17,10 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 import sim_regional as sim
-# Import seasonal-curve helpers from the main app (defined at module top)
-from app import seasonal_curve, seasonal_curve_float, TIER_SHARE
+# Seasonal-curve helpers come from the UI-free shared module. Never import
+# from app.py here: importing a Streamlit script executes its entire UI
+# into this page.
+from sim_common import seasonal_curve, seasonal_curve_float, TIER_SHARE
 
 st.set_page_config(layout="wide", page_title="Regional 2-RW Simulator", page_icon="\U0001F30D")
 st.title("\U0001F30D  Regional 2-RW Simulator")
@@ -209,7 +211,7 @@ for i, sp in enumerate(REG_SPLITS):
 
 # ── Run the simulation ──────────────────────────────────────────────────────
 def _normalize_dist():
-    """Return ints summing to 100 (largest-remainder)."""
+    """Return the five distribution shares rescaled to sum exactly to 100."""
     parts = {
         'mat':   st.session_state.reg_dist_mat,
         'semi':  st.session_state.reg_dist_semi,
@@ -220,8 +222,7 @@ def _normalize_dist():
     tot = sum(parts.values())
     if tot == 0:
         return {**parts, 'store': 100}
-    # Scale to 100 — just use values as % directly
-    return parts
+    return {k: v * 100.0 / tot for k, v in parts.items()}
 
 dist = _normalize_dist()
 T = st.session_state.reg_total_init
@@ -229,7 +230,7 @@ init_mat   = int(round(T * dist['mat']   / 100))
 init_semi  = int(round(T * dist['semi']  / 100))
 init_cw    = int(round(T * dist['cw']    / 100))
 init_rw    = int(round(T * dist['rw']    / 100))
-init_store = T - init_mat - init_semi - init_cw - init_rw
+init_store = max(0, T - init_mat - init_semi - init_cw - init_rw)
 
 if st.session_state.reg_demand_mode == "Flat":
     demand_curve = [st.session_state.reg_demand_per_wk] * st.session_state.reg_weeks

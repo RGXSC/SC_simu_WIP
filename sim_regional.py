@@ -185,6 +185,14 @@ def run_simulation_regional(
     if N_REG == 0:
         N_REG = 1
 
+    # Negative initial stocks are always caller bugs — refuse loudly rather
+    # than simulating stores that start below zero.
+    for _name, _v in (("init_rawmat", init_rawmat), ("init_semi", init_semi),
+                      ("init_cw", init_cw), ("init_rw_total", init_rw_total),
+                      ("init_store_total", init_store_total)):
+        if _v < 0:
+            raise ValueError(f"{_name} must be >= 0, got {_v}")
+
     # ── Initial stocks ──
     # The W0 operator does NOT know the regional demand split — the
     # planner discovers it at the first review. So initial stock is split
@@ -278,6 +286,10 @@ def run_simulation_regional(
 
     # ── Planner state ──
     ff = float(base_forecast)
+    # Planner's working weekly rate. Used by the push steps (8-9) every
+    # week, so it must exist even before the first review when
+    # order_freq > 1; between reviews it holds the last reviewed value.
+    ff_now = ff
     ps_rate_a = np.full(N_REG, ff * region_split_a / N_REG, dtype=float)
     ps_rate_b = np.full(N_REG, ff * region_split_b / N_REG, dtype=float)
     PS_ALPHA = 0.3
@@ -495,33 +507,56 @@ def run_simulation_regional(
         fi = math.ceil(min(semi, fpc, fp_backlog)) if (semi > 0.01 and fp_backlog > 0.01) else 0.0
         semi -= fi; fp_backlog -= fi
 
-        # 8. CW → RW push (smart-aware allocation between RW_A and RW_B)
-        push_a = math.ceil(min(cw, ship_backlog_a)) if ship_backlog_a > 0.01 else 0.0
-        push_b = math.ceil(min(cw - push_a, ship_backlog_b)) if ship_backlog_b > 0.01 else 0.0
-        if smart_distrib and discovered_share and (push_a + push_b > 0):
-            # Re-allocate to equalise weeks-of-cover between regions.
-            cov_a = (rw_a + sum(cw_rw_pipe_a) + float(stores_a.sum())) / max(1e-6, ff_now * share_a)
-            cov_b = (rw_b + sum(cw_rw_pipe_b) + float(stores_b.sum())) / max(1e-6, ff_now * (1 - share_a))
-            total_push = int(push_a + push_b)
-            if cov_a < cov_b:
-                # Prioritise A
-                gap = math.ceil(max(0, (cov_b - cov_a) * ff_now * share_a))
-                pri = min(total_push, gap)
-                rest = total_push - pri
-                push_a = pri + int(round(rest * share_a))
-                push_b = total_push - push_a
-            elif cov_b < cov_a:
-                gap = math.ceil(max(0, (cov_a - cov_b) * ff_now * (1 - share_a)))
-                pri = min(total_push, gap)
-                rest = total_push - pri
-                push_b = pri + int(round(rest * (1 - share_a)))
-                push_a = total_push - push_b
+        # 8. CW → RW push. If CW covers both ship backlogs, both regions
+        # are served in full and no rationing is needed. When CW is
+        # scarce, the available units are rationed:
+        #   - 50/50 before the regional split is discovered (both modes)
+        #   - by the locked share in Push mode
+        #   - by weeks-of-cover equalisation in Smart mode (post-review)
+        # No region is ever served "first": the old sequential
+        # min(cw, backlog_a)-then-remainder gave Region A priority
+        # whenever CW was scarce in Push mode.
+        need_a = int(ship_backlog_a) if ship_backlog_a > 0.01 else 0
+        need_b = int(ship_backlog_b) if ship_backlog_b > 0.01 else 0
+        avail = int(cw)
+        if need_a + need_b <= avail:
+            push_a, push_b = need_a, need_b
+        else:
+            total_push = avail
+            if smart_distrib and discovered_share:
+                # Equalise weeks-of-cover between regions.
+                cov_a = (rw_a + sum(cw_rw_pipe_a) + float(stores_a.sum())) / max(1e-6, ff_now * share_a)
+                cov_b = (rw_b + sum(cw_rw_pipe_b) + float(stores_b.sum())) / max(1e-6, ff_now * (1 - share_a))
+                if cov_a < cov_b:
+                    gap = math.ceil(max(0, (cov_b - cov_a) * ff_now * share_a))
+                    pri = min(total_push, gap)
+                    rest = total_push - pri
+                    push_a = pri + int(round(rest * share_a))
+                    push_b = total_push - push_a
+                elif cov_b < cov_a:
+                    gap = math.ceil(max(0, (cov_a - cov_b) * ff_now * (1 - share_a)))
+                    pri = min(total_push, gap)
+                    rest = total_push - pri
+                    push_b = pri + int(round(rest * (1 - share_a)))
+                    push_a = total_push - push_b
+                else:
+                    push_a = int(round(total_push * share_a))
+                    push_b = total_push - push_a
             else:
-                push_a = int(round(total_push * share_a))
+                # Push mode (or pre-review in either mode): fixed ratio.
+                ration_a = share_a if discovered_share else 0.5
+                push_a = int(round(total_push * ration_a))
                 push_b = total_push - push_a
-            # Cap by ship_backlogs (don't overship beyond what was ordered)
-            push_a = min(push_a, int(ship_backlog_a))
-            push_b = min(push_b, int(ship_backlog_b))
+            # Cap by each region's actual backlog, then hand any slack the
+            # caps created to the other region (it has unmet need by
+            # construction, since need_a + need_b > avail here).
+            push_a = min(push_a, need_a)
+            push_b = min(push_b, need_b)
+            slack = total_push - push_a - push_b
+            if slack > 0:
+                add_a = min(slack, need_a - push_a)
+                push_a += add_a
+                push_b += min(slack - add_a, need_b - push_b)
 
         cw -= (push_a + push_b)
         ship_backlog_a -= push_a; ship_backlog_b -= push_b

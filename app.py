@@ -95,13 +95,10 @@ SELL_THROUGH_SEASONAL = {
 }
 PRESET_WEEKS = 26
 
-# Seasonal sub-profile parameters: (peak_position_ratio, shape_k)
-# theta is computed from ratio × weeks / (k - 1); peak position scales with sim length
-SEASONAL_PARAMS = {
-    "Very Steep": (3.0 / 26.0, 2.5),   # peak W3 in 26wk, ~4× avg, fast decay
-    "Steep":      (6.0 / 26.0, 3.0),   # peak W6 in 26wk, ~2.4× avg
-    "~Flat":      (6.0 / 26.0, 1.8),   # peak W6, ~1.6× avg, gentle dome (tail ~35%)
-}
+# Seasonal parameters + curve helpers + tier constants live in sim_common
+# (UI-free module shared with pages/Regional.py).
+from sim_common import (SEASONAL_PARAMS, TIER_SHARE, TIER_WEIGHTS,
+                        gamma_pdf, seasonal_curve, seasonal_curve_float)
 
 # Session-state defaults (initialized at app start)
 _DEFAULTS = {
@@ -126,43 +123,6 @@ for _k, _v in _DEFAULTS.items():
 # ════════════════════════════════════════════════════════════════
 # MATH HELPERS — pure functions
 # ════════════════════════════════════════════════════════════════
-
-def gamma_pdf(x: float, k: float, theta: float) -> float:
-    """Gamma PDF value at x (shape k, scale theta). Returns 0 for x <= 0."""
-    if x <= 0:
-        return 0.0
-    return (x ** (k - 1)) * math_exp(-x / theta) / ((theta ** k) * gamma_fn(k))
-
-
-def seasonal_curve(weeks: int, sub_shape: str, avg: float) -> list[int]:
-    """
-    Build a length-weeks seasonal demand list scaled so its total = avg × weeks.
-
-    Uses a gamma distribution whose peak position scales with the simulation
-    length (peak at ratio × weeks). This keeps the shape recognizable when
-    users change sim length. Returns integers (display/sim-input form).
-    """
-    ratio, k = SEASONAL_PARAMS.get(sub_shape, SEASONAL_PARAMS["Steep"])
-    theta = (ratio * weeks) / max(k - 1, 0.1)
-    pdf_vals = [gamma_pdf(w, k, theta) for w in range(1, weeks + 1)]
-    pdf_sum = sum(pdf_vals) or 1.0
-    total = avg * weeks
-    return [max(0, int(round(v * total / pdf_sum))) for v in pdf_vals]
-
-
-def seasonal_curve_float(weeks: int, sub_shape: str, avg: float) -> list[float]:
-    """
-    Same gamma shape as seasonal_curve, but UNROUNDED. Used as the planner's
-    internal belief curve so the discovered amplitude factor is a clean ratio
-    (e.g., exactly 3.0 for avg=300 vs. avg=100, not 2.97 from integer drift).
-    """
-    ratio, k = SEASONAL_PARAMS.get(sub_shape, SEASONAL_PARAMS["Steep"])
-    theta = (ratio * weeks) / max(k - 1, 0.1)
-    pdf_vals = [gamma_pdf(w, k, theta) for w in range(1, weeks + 1)]
-    pdf_sum = sum(pdf_vals) or 1.0
-    total = avg * weeks
-    return [max(0.0, v * total / pdf_sum) for v in pdf_vals]
-
 
 def build_demand_curve(shape: str, weeks: int, *,
                        base: int = BASE_FORECAST,
@@ -294,8 +254,7 @@ def _smart_alloc_n(ship_out, stores_arr, dist_pipes, forecast_per_store):
 #   small         60% × 0.5× rate  → carries 30%
 # Mean weight = 0.10·4 + 0.30·1 + 0.60·0.5 = 1.0 (no scaling drift; the
 # multinomial preserves aggregate demand exactly).
-TIER_WEIGHTS = {"small": 0.5, "medium": 1.0, "high": 4.0}
-TIER_SHARE   = {"small": 0.60, "medium": 0.30, "high": 0.10}
+# (canonical definitions live in sim_common; re-exported here for back-compat)
 
 def _store_tier_probs(n_stores, rng_seed=None):
     """
