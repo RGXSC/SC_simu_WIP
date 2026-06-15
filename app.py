@@ -1913,27 +1913,26 @@ def render_batch_ui():
         BATCH_INPUT_COLS[0]:  TextCol(width="medium", pinned=True),
         BATCH_INPUT_COLS[1]:  NumberCol(min_value=13, max_value=52, step=1),
         BATCH_INPUT_COLS[2]:  NumberCol(min_value=2, max_value=500, step=1),     # N stores
-        BATCH_INPUT_COLS[3]:  NumberCol(min_value=0, max_value=10000, step=1),    # Seed
-        BATCH_INPUT_COLS[4]:  NumberCol(min_value=1, max_value=24, step=1),       # Material LT
-        BATCH_INPUT_COLS[5]:  NumberCol(min_value=1, max_value=12, step=1),
-        BATCH_INPUT_COLS[6]:  NumberCol(min_value=1, max_value=12, step=1),
-        BATCH_INPUT_COLS[7]:  NumberCol(min_value=1, max_value=12, step=1),
-        BATCH_INPUT_COLS[8]:  NumberCol(min_value=1, max_value=4, step=1),
-        BATCH_INPUT_COLS[9]:  NumberCol(min_value=0, max_value=50000, step=50),
-        BATCH_INPUT_COLS[10]: NumberCol(min_value=0, max_value=100, step=5),
-        BATCH_INPUT_COLS[11]: NumberCol(min_value=0, max_value=100, step=5),
-        BATCH_INPUT_COLS[12]: NumberCol(min_value=0, max_value=100, step=5),
-        BATCH_INPUT_COLS[13]: CheckCol(),
-        BATCH_INPUT_COLS[14]: SelectCol(options=["Linear", "Seasonal"]),
-        BATCH_INPUT_COLS[15]: NumberCol(min_value=0, max_value=1000, step=10),
-        BATCH_INPUT_COLS[16]: NumberCol(min_value=1, max_value=52, step=1),
-        BATCH_INPUT_COLS[17]: SelectCol(options=["Very Steep", "Steep", "~Flat"]),
-        BATCH_INPUT_COLS[18]: NumberCol(min_value=0, max_value=1000, step=10),
-        BATCH_INPUT_COLS[19]: NumberCol(min_value=10, max_value=1000, step=10),
-        BATCH_INPUT_COLS[20]: NumberCol(min_value=0, max_value=50, step=5),
-        BATCH_INPUT_COLS[21]: NumberCol(min_value=100, max_value=10000, step=100),
-        BATCH_INPUT_COLS[22]: NumberCol(min_value=10, max_value=5000, step=10),
-        BATCH_INPUT_COLS[23]: NumberCol(min_value=0, max_value=100, step=5),
+        BATCH_INPUT_COLS[3]:  NumberCol(min_value=1, max_value=24, step=1),       # Material LT
+        BATCH_INPUT_COLS[4]:  NumberCol(min_value=1, max_value=12, step=1),       # Semi LT
+        BATCH_INPUT_COLS[5]:  NumberCol(min_value=1, max_value=12, step=1),       # Finishing LT
+        BATCH_INPUT_COLS[6]:  NumberCol(min_value=1, max_value=12, step=1),       # Distribution LT
+        BATCH_INPUT_COLS[7]:  NumberCol(min_value=1, max_value=4,  step=1),       # Order Freq
+        BATCH_INPUT_COLS[8]:  NumberCol(min_value=0, max_value=50000, step=50),   # Total Init Stock
+        BATCH_INPUT_COLS[9]:  NumberCol(min_value=0, max_value=100, step=5),      # Init Store %
+        BATCH_INPUT_COLS[10]: NumberCol(min_value=0, max_value=100, step=5),      # Init WH %
+        BATCH_INPUT_COLS[11]: NumberCol(min_value=0, max_value=100, step=5),      # Init Semi %
+        BATCH_INPUT_COLS[12]: CheckCol(),                                         # Smart Distrib
+        BATCH_INPUT_COLS[13]: SelectCol(options=["Linear", "Seasonal"]),          # Demand Shape
+        BATCH_INPUT_COLS[14]: NumberCol(min_value=0, max_value=1000, step=10),    # Linear End
+        BATCH_INPUT_COLS[15]: NumberCol(min_value=1, max_value=52,  step=1),      # Linear Transition
+        BATCH_INPUT_COLS[16]: SelectCol(options=["Very Steep", "Steep", "~Flat"]),# Seasonal Sub-shape
+        BATCH_INPUT_COLS[17]: NumberCol(min_value=0, max_value=1000, step=10),    # Seasonal Avg
+        BATCH_INPUT_COLS[18]: NumberCol(min_value=10, max_value=1000, step=10),   # Capacity Start
+        BATCH_INPUT_COLS[19]: NumberCol(min_value=0, max_value=50, step=5),       # Capacity Ramp
+        BATCH_INPUT_COLS[20]: NumberCol(min_value=100, max_value=10000, step=100),# Price
+        BATCH_INPUT_COLS[21]: NumberCol(min_value=10, max_value=5000, step=10),   # Var Cost
+        BATCH_INPUT_COLS[22]: NumberCol(min_value=0, max_value=100, step=5),      # Fixed Cost %
     }
     # Mark output columns read-only with formatting
     for c in BATCH_OUTPUT_COLS:
