@@ -60,12 +60,22 @@ def _step(wh, big, small, in_big, in_small, can_replenish: bool,
     # 3. Replenishment from warehouse (observes sales, refills to target).
     # In the 'dump-everything' policy the warehouse is empty and there
     # is nothing to send — we just leave the orders at 0.
+    #
+    # The re-order quantity is a simple order-up-to-S policy with
+    # S = COVER_TARGET_WEEKS of demand. The inventory POSITION at decision
+    # time is just the on-hand stock: with a 1-week lead time, last week's
+    # order has already arrived (it was folded into `big`/`small` in step 1)
+    # and this week's order hasn't been placed yet, so there is nothing else
+    # in transit. We must NOT subtract `in_big`/`in_small` here — those units
+    # are the arrival that is already counted in `big`/`small`. Doing so
+    # would double-count them and make the shop under-order (and periodically
+    # stock out) even while the warehouse is full.
     new_in_big = new_in_small = 0
     if place_orders and can_replenish and wh > 0:
         target_big   = big_rate   * COVER_TARGET_WEEKS
         target_small = small_rate * COVER_TARGET_WEEKS
-        need_big   = max(0, target_big   - big   - in_big)
-        need_small = max(0, target_small - small - in_small)
+        need_big   = max(0, target_big   - big)
+        need_small = max(0, target_small - small)
         # Big shop is the more urgent one (higher rate); serve it first
         # if the warehouse can't cover both. Simple, predictable, and
         # what a sensible operator would do.
@@ -75,6 +85,17 @@ def _step(wh, big, small, in_big, in_small, can_replenish: bool,
             new_in_big   = min(need_big, wh)
             new_in_small = wh - new_in_big
         wh -= (new_in_big + new_in_small)
+
+        # Bug-proofing invariant: after ordering, every shop must be topped
+        # to its target UNLESS the warehouse has been fully drained. If the
+        # warehouse still holds stock while a shop sits below target, we are
+        # hoarding stock that a shop will need — exactly the failure mode
+        # that the old double-subtraction produced.
+        assert wh == 0 or (
+            big + new_in_big >= target_big and small + new_in_small >= target_small
+        ), (f"warehouse hoarding: wh={wh} but "
+            f"big_pos={big + new_in_big}/{target_big}, "
+            f"small_pos={small + new_in_small}/{target_small}")
 
     return wh, big, small, sold_big, sold_small, lost_big, lost_small, new_in_big, new_in_small
 
@@ -107,6 +128,17 @@ def simulate(bought: int, hold_pct: float,
             wh, big, small, in_big, in_small, can_replenish,
             big_rate, small_rate, place_orders)
         states.append(WeekState(wh, big, small, sb, ss, lb, ls, in_big, in_small))
+
+    # Bug-proofing invariant: mass conservation. Every unit bought is either
+    # sold or still sitting somewhere (warehouse + the two shops) at the end.
+    # No order is placed on the final week, so nothing is stranded in transit;
+    # therefore bought == sold + on-hand exactly. A mismatch means a unit was
+    # created or lost in the accounting (the symptom a phantom-stock bug shows).
+    sold_total = sum(s.sold_big + s.sold_small for s in states)
+    on_hand    = states[-1].wh + states[-1].big + states[-1].small
+    assert bought == sold_total + on_hand, (
+        f"mass not conserved: bought={bought} != sold={sold_total} "
+        f"+ on_hand={on_hand}")
     return states
 
 
