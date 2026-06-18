@@ -118,13 +118,16 @@ class MCResult:
 # ───────────────────────────── the engine ──────────────────────────────
 
 def _run_policy(rate: np.ndarray, store0: np.ndarray, wh0: np.ndarray,
-                replenish: bool):
+                replenish: bool, check_invariants: bool = True):
     """Simulate every (run, SKU, store) for WEEKS weeks under one policy.
 
     rate   : (R, K, M) flat weekly sell-rate per cell.
     store0 : (R, K, M) day-1 store stock.
     wh0    : (R, K)    day-1 warehouse stock per SKU.
     replenish: KEEP policy if True; DUMP (warehouse idle) if False.
+    check_invariants: per-week no-hoarding assert. Cheap on small grids but
+                      doubles work on big ones, so callers running a parameter
+                      sweep can disable it after the smoke run has passed.
 
     Returns (sold, lost, stuck) — each summed to a per-run total (R,).
     """
@@ -164,9 +167,10 @@ def _run_policy(rate: np.ndarray, store0: np.ndarray, wh0: np.ndarray,
 
             # Invariant: no hoarding. After ordering, every store is at its
             # target unless the SKU warehouse is drained to ~0.
-            pos = stores + ship
-            ok = (wh <= _EPS) | np.all(pos >= target - 1e-4, axis=2)
-            assert ok.all(), "warehouse hoarding: stock held while a store sits below cover"
+            if check_invariants:
+                pos = stores + ship
+                ok = (wh <= _EPS) | np.all(pos >= target - 1e-4, axis=2)
+                assert ok.all(), "warehouse hoarding: stock held while a store sits below cover"
 
     stuck = wh.sum(axis=1) + stores.sum(axis=(1, 2))             # (R,)
     return sold_tot, lost_tot, stuck
@@ -182,7 +186,9 @@ def simulate_mc(forecast_per_week: float,
                 runs: int = 10_000,
                 price: float = PRICE, var_cost: float = VAR_COST,
                 fixed_cost: float = 0.0,
-                seed: int | None = 0) -> MCResult:
+                seed: int | None = 0,
+                compute_dump: bool = True,
+                check_invariants: bool = True) -> MCResult:
     """Run ``runs`` Monte-Carlo seasons for both policies and aggregate.
 
     forecast_per_week  : assortment-wide forecast units/week (all SKUs+stores).
@@ -215,13 +221,25 @@ def simulate_mc(forecast_per_week: float,
     dump_wh0    = np.zeros((R, K))
     keep_wh0    = np.full((R, K), wh_per_sku)
 
-    d_sold, d_lost, d_stuck = _run_policy(rate, dump_store0, dump_wh0, replenish=False)
-    k_sold, k_lost, k_stuck = _run_policy(rate, store0,      keep_wh0, replenish=True)
+    if compute_dump:
+        d_sold, d_lost, d_stuck = _run_policy(rate, dump_store0, dump_wh0,
+                                              replenish=False,
+                                              check_invariants=check_invariants)
+    else:
+        # NaN, not 0, so any downstream code that forgets to gate on
+        # compute_dump (e.g. MCResult.gap) loudly produces NaN rather than
+        # silently lying. The table loop never reads these.
+        d_sold = d_lost = d_stuck = np.full(R, np.nan)
+    k_sold, k_lost, k_stuck = _run_policy(rate, store0, keep_wh0,
+                                          replenish=True,
+                                          check_invariants=check_invariants)
 
     # ── conservation invariant (bought == sold + on-hand, per run) ──
-    bought_total = float(bought)  # both policies buy the same total
-    assert np.allclose(d_sold + d_stuck, bought_total, atol=1e-3), "DUMP mass not conserved"
-    assert np.allclose(k_sold + k_stuck, bought_total, atol=1e-3), "KEEP mass not conserved"
+    if check_invariants:
+        bought_total = float(bought)  # both policies buy the same total
+        if compute_dump:
+            assert np.allclose(d_sold + d_stuck, bought_total, atol=1e-3), "DUMP mass not conserved"
+        assert np.allclose(k_sold + k_stuck, bought_total, atol=1e-3), "KEEP mass not conserved"
 
     def margin(sold, stuck):
         turnover = sold * price

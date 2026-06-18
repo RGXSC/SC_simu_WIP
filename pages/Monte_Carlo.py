@@ -1,14 +1,18 @@
-"""'Does keeping stock central still pay when demand is random?' — MC page.
+"""'Does keeping stock central still pay when demand is random?' — MC table.
 
-The sibling of *Where should the stock sit?*, scaled up and made stochastic.
-Same lesson, sharper: you buy the right TOTAL but cannot know which of the
-N SKUs will be a winner or which of the M stores will sell it. We roll the
-season thousands of times — each roll redraws every (SKU, store) sell-rate
-from two user-chosen distributions — and look at the DISTRIBUTION of how
-much keeping a slice central beats dumping everything to stores on day 1.
+The stochastic, multi-SKU / multi-store generalisation of
+*Where should the stock sit?*. You buy the right TOTAL but cannot know
+which of the N SKUs will be a winner or which of the M stores will sell
+it. We roll the season many times and tabulate the average margin / sell-
+through / lost sales for every combination of:
 
-Built entirely on the validated ``sim_nstores`` engine (invariant-checked:
-no warehouse hoarding, exact mass conservation).
+  * %% kept central on day 1   (rows)        — the lever
+  * target sell-through of buy (columns)     — how much you over- or under-buy
+
+Built on the validated ``sim_nstores`` engine (no-hoarding & mass-
+conservation invariants are exercised in the standalone smoke test; the
+table loop runs the same code with the per-week assert turned off for
+speed, after the smoke run has proven the path).
 """
 from __future__ import annotations
 import altair as alt
@@ -16,7 +20,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from sim_nstores import simulate_mc, summarise, WEEKS
+from sim_nstores import simulate_mc, draw_mean1, WEEKS
 from ui_nav import top_nav
 
 st.set_page_config(layout="wide", page_title="Central stock under uncertainty",
@@ -38,9 +42,10 @@ st.markdown(
 )
 st.markdown(
     "<div style='color:#5a6a80; font-size:14px; margin-bottom:14px;'>"
-    f"We roll the {WEEKS}-week season thousands of times. Same buy every time — "
-    "but each roll redraws which SKUs and which stores happen to sell. "
-    "<b>Where should the stock start?</b></div>",
+    f"For every combination of <b>% kept central</b> (lever) and "
+    f"<b>target sell-through</b> (how much you buy), we roll the "
+    f"{WEEKS}-week season many times and report the average outcome. "
+    "Row <b>0%</b> = dumping everything to stores on day 1.</div>",
     unsafe_allow_html=True,
 )
 
@@ -50,164 +55,236 @@ _FAMILIES = {
     "Normal (symmetric, clipped)": "truncnormal",
 }
 
-# ── Inputs ────────────────────────────────────────────────────────────────
+# Table axes — fixed so the heatmap reads consistently across param changes
+HOLD_PCTS  = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+TARGET_STS = [50, 60, 70, 80, 90, 100]
+
+
+# ─────────────────────────── inputs ───────────────────────────────────────
 c1, c2, c3, c4 = st.columns(4)
 with c1:
-    forecast_per_week = st.number_input(
+    forecast_per_week = st.slider(
         "Forecast (units / week, whole assortment)",
-        min_value=20, max_value=1000, value=100, step=10,
+        min_value=1000, max_value=10000, value=5000, step=500,
         help="Total weekly sales you THINK you'll do across every SKU and store. "
-             "Sets how much you buy for the season.")
+             "Drives how much you buy for the season.")
 with c2:
-    target_sell_through = st.slider(
-        "Target sell-through for buy (%)",
-        min_value=10, max_value=100, value=70, step=5,
-        help="How much of the buy you aim to actually sell. 100% = buy exactly "
-             "the forecast; 50% = buy double.")
+    n_sku = st.slider("Number of SKUs", min_value=50, max_value=2000,
+                      value=200, step=50,
+                      help="How many distinct products share the buy. "
+                           "You can't know up front which will be the winners.")
 with c3:
-    n_sku = st.slider("Number of SKUs", min_value=1, max_value=40, value=10, step=1,
-                      help="How many distinct products. You can't know in advance "
-                           "which will be the winners.")
+    n_store = st.slider("Number of stores", min_value=2, max_value=60,
+                        value=20, step=1)
 with c4:
-    n_store = st.slider("Number of stores", min_value=2, max_value=60, value=20, step=1,
-                        help="How many stores share the assortment.")
+    price    = st.number_input("Selling price (€ / unit)",
+                               min_value=1, max_value=200, value=10, step=1)
+    var_cost = st.number_input("Cost of goods (€ / unit)",
+                               min_value=1, max_value=200, value=5, step=1)
 
-m1, m2, m3, m4 = st.columns(4)
-with m1:
-    hold_pct = st.slider(
-        "**% kept central on day 1** \U0001F441 (the lever)",
-        min_value=0, max_value=100, value=30, step=5,
-        help="0% = dump everything to stores on day 1. 100% = hold it all "
-             "central and feed stores weekly. The truth is in between.")
-with m2:
-    price = st.slider("Selling price (€ / unit)", min_value=2, max_value=50,
-                      value=10, step=1)
-with m3:
-    var_cost = st.slider("Cost of goods (€ / unit)", min_value=1, max_value=40,
-                         value=5, step=1)
-with m4:
-    runs = st.select_slider("Monte-Carlo rolls", options=[1000, 2000, 5000, 10000, 20000],
-                            value=5000,
-                            help="More rolls = smoother distribution, slower. "
-                                 "Results are cached per setting.")
-
-# ── The two noise sources (user picks the distribution) ──
-st.markdown("<div style='font-size:13px; color:#5a6a80; margin:6px 0 2px;'>"
-            "The two sources of randomness — pick a shape and how wild it is "
-            "(CV = std ÷ mean):</div>", unsafe_allow_html=True)
-d1, d2, d3, d4 = st.columns(4)
-with d1:
-    dist1_label = st.selectbox("SKU strength vs forecast — shape",
-                               list(_FAMILIES), index=0,
-                               help="How much actual sales of a SKU deviate from "
-                                    "forecast. One draw per SKU, shared by its stores.")
-with d2:
-    dist1_cv = st.slider("SKU strength volatility (CV)", min_value=0.0, max_value=1.5,
-                         value=0.6, step=0.1)
-with d3:
-    dist2_label = st.selectbox("Store vs average — shape",
-                               list(_FAMILIES), index=0,
-                               help="How much a store sells vs the average store. "
-                                    "One draw per (SKU, store) couple.")
-with d4:
-    dist2_cv = st.slider("Store volatility (CV)", min_value=0.0, max_value=1.5,
-                         value=0.6, step=0.1)
-
-
-@st.cache_data(show_spinner="Rolling the season…")
-def _run(forecast_per_week, n_sku, n_store, hold_pct, target_sell_through,
-         d1_fam, d1_cv, d2_fam, d2_cv, runs, price, var_cost):
-    """Cached MC run. Returns headline stats + a binned gap histogram so the
-    cache stays small (no big arrays kept around)."""
-    res = simulate_mc(
-        forecast_per_week=forecast_per_week, n_sku=n_sku, n_store=n_store,
-        hold_pct=hold_pct / 100.0, target_sell_through=target_sell_through / 100.0,
-        dist1_family=d1_fam, dist1_cv=d1_cv, dist2_family=d2_fam, dist2_cv=d2_cv,
-        runs=runs, price=float(price), var_cost=float(var_cost), seed=0)
-    summ = summarise(res)
-    counts, edges = np.histogram(res.gap, bins=40)
-    summ["hist_counts"] = counts.tolist()
-    summ["hist_edges"]  = edges.tolist()
-    return summ
-
-
-summ = _run(forecast_per_week, n_sku, n_store, hold_pct, target_sell_through,
-            _FAMILIES[dist1_label], dist1_cv, _FAMILIES[dist2_label], dist2_cv,
-            runs, price, var_cost)
-
-# ── Headline ──
-keep_wins = summ["keep_wins_pct"]
-mean_gap  = summ["mean_gap"]
 st.markdown(
-    f"<div style='text-align:center; font-size:15px; color:#1a2a40; margin:14px 0 4px;'>"
-    f"You buy <b>{summ['bought']:,}</b> units. Across <b>{runs:,}</b> rolled seasons, "
-    f"keeping <b>{hold_pct}%</b> central beats dumping everything in "
-    f"<b style='color:#1a8a4a;'>{keep_wins:.0f}%</b> of them — "
-    f"average margin gained <b style='color:#1a8a4a;'>€{mean_gap:,.0f}</b>.</div>",
+    "<div style='font-size:13px; color:#5a6a80; margin:10px 0 2px;'>"
+    "The two sources of randomness — pick a shape and how wild it is "
+    "(CV = std ÷ mean). The little chart shows the resulting multiplier "
+    "applied to the SKU's or store's average.</div>",
     unsafe_allow_html=True,
 )
 
+d1col, d2col = st.columns(2)
+with d1col:
+    st.markdown("<div style='font-size:13px; font-weight:600; margin-top:2px;'>"
+                "SKU strength vs forecast <span style='color:#5a6a80; font-weight:400;'>"
+                "— one draw per SKU, shared by all its stores</span></div>",
+                unsafe_allow_html=True)
+    dd1, dd2 = st.columns([3, 2])
+    with dd1:
+        dist1_label = st.selectbox("Shape", list(_FAMILIES), index=0,
+                                    key="d1_shape", label_visibility="collapsed")
+    with dd2:
+        dist1_cv = st.slider("CV", min_value=0.0, max_value=1.5, value=0.6,
+                              step=0.1, key="d1_cv", label_visibility="collapsed")
+with d2col:
+    st.markdown("<div style='font-size:13px; font-weight:600; margin-top:2px;'>"
+                "Store vs average <span style='color:#5a6a80; font-weight:400;'>"
+                "— one draw per (SKU, store)</span></div>",
+                unsafe_allow_html=True)
+    dd3, dd4 = st.columns([3, 2])
+    with dd3:
+        dist2_label = st.selectbox("Shape", list(_FAMILIES), index=0,
+                                    key="d2_shape", label_visibility="collapsed")
+    with dd4:
+        dist2_cv = st.slider("CV", min_value=0.0, max_value=1.5, value=0.6,
+                              step=0.1, key="d2_cv", label_visibility="collapsed")
 
-def _card(title, margin_mean, sellt, lost, accent):
-    return (
-        f"<div style='flex:1; border:1px solid #e3e8ef; border-top:3px solid {accent}; "
-        f"border-radius:8px; padding:12px 16px;'>"
-        f"<div style='font-weight:700; font-size:12px; letter-spacing:.5px; "
-        f"text-transform:uppercase; color:{accent}; margin-bottom:8px;'>{title}</div>"
-        f"<div style='display:flex; justify-content:space-between; font-size:13px; "
-        f"padding:2px 0;'><span style='color:#5a6a80;'>Avg margin</span>"
-        f"<b>€{margin_mean:,.0f}</b></div>"
-        f"<div style='display:flex; justify-content:space-between; font-size:13px; "
-        f"padding:2px 0;'><span style='color:#5a6a80;'>Avg sell-through</span>"
-        f"<b>{sellt:.0f}%</b></div>"
-        f"<div style='display:flex; justify-content:space-between; font-size:13px; "
-        f"padding:2px 0;'><span style='color:#5a6a80;'>Avg lost sales</span>"
-        f"<b>{lost:,.0f} units</b></div>"
-        f"</div>")
+
+# ─────────────────────────── distribution previews ────────────────────────
+@st.cache_data(show_spinner=False)
+def _dist_samples(family: str, cv: float) -> np.ndarray:
+    """20k draws used purely to render the shape preview chart."""
+    rng = np.random.default_rng(42)
+    return draw_mean1(rng, family, cv, (20_000,))
+
+
+def _dist_chart(family: str, cv: float, accent: str = "#1a8a4a") -> alt.Chart:
+    """Histogram of 20k mean-1 draws, with the mean line dashed at x=1."""
+    if cv <= 0:
+        df = pd.DataFrame({"x": [1.0], "y": [1.0]})
+        bar = alt.Chart(df).mark_rule(strokeWidth=5, color=accent).encode(
+            x=alt.X("x:Q", title="multiplier (mean = 1)",
+                    scale=alt.Scale(domain=[0, 3])))
+    else:
+        samples = _dist_samples(family, cv)
+        # Clip the long right tail for legibility; never clip below.
+        p99 = float(np.percentile(samples, 99))
+        df = pd.DataFrame({"x": samples[samples <= p99]})
+        bar = alt.Chart(df).mark_bar(color=accent, opacity=0.75).encode(
+            x=alt.X("x:Q", bin=alt.Bin(maxbins=40),
+                    title="multiplier (mean = 1)"),
+            y=alt.Y("count():Q", axis=alt.Axis(labels=False, title=None,
+                                                ticks=False, domain=False)),
+        )
+    mean_line = alt.Chart(pd.DataFrame({"x": [1.0]})).mark_rule(
+        strokeDash=[3, 3], color="#1a2a40", size=2).encode(x="x:Q")
+    return (bar + mean_line).properties(height=130)
+
+
+prev1, prev2 = st.columns(2)
+with prev1:
+    st.altair_chart(_dist_chart(_FAMILIES[dist1_label], dist1_cv),
+                    use_container_width=True)
+with prev2:
+    st.altair_chart(_dist_chart(_FAMILIES[dist2_label], dist2_cv),
+                    use_container_width=True)
+
+
+# ─────────────────────────── table compute ────────────────────────────────
+@st.cache_data(show_spinner="Computing the table (one-time, then cached)…")
+def _compute_table(forecast: int, n_sku: int, n_store: int,
+                   d1_fam: str, d1_cv: float, d2_fam: str, d2_cv: float,
+                   price: float, var_cost: float):
+    """Sweep HOLD_PCTS x TARGET_STS, return (margin, sellthrough, lost, bought).
+
+    Runs auto-scale: budget ~1.5M (run, SKU, store) cells per call. At the
+    default 200 SKUs / 20 stores that gives R=100; at the 2000-SKU/60-store
+    extreme it floors at R=20 (per-run mean over 120k samples is already
+    very stable, so MC noise is tiny).
+    """
+    R = max(20, min(100, int(1_500_000 / (n_sku * n_store))))
+    margin = np.zeros((len(HOLD_PCTS), len(TARGET_STS)))
+    sellt  = np.zeros_like(margin)
+    lost   = np.zeros_like(margin)
+    bought_by_st = np.zeros(len(TARGET_STS), dtype=int)
+
+    for ti, st_pct in enumerate(TARGET_STS):
+        for hi, hold in enumerate(HOLD_PCTS):
+            res = simulate_mc(
+                forecast_per_week=forecast, n_sku=n_sku, n_store=n_store,
+                hold_pct=hold / 100.0,
+                target_sell_through=st_pct / 100.0,
+                dist1_family=d1_fam, dist1_cv=d1_cv,
+                dist2_family=d2_fam, dist2_cv=d2_cv,
+                runs=R, price=price, var_cost=var_cost, seed=0,
+                compute_dump=False, check_invariants=False,
+            )
+            margin[hi, ti] = res.keep_margin.mean()
+            sellt[hi, ti]  = res.keep_sold.mean() / res.bought * 100.0
+            lost[hi, ti]   = res.keep_lost.mean()
+            bought_by_st[ti] = res.bought
+    return margin, sellt, lost, bought_by_st, R
+
+
+margin, sellt, lost, bought_by_st, R_used = _compute_table(
+    int(forecast_per_week), int(n_sku), int(n_store),
+    _FAMILIES[dist1_label], float(dist1_cv),
+    _FAMILIES[dist2_label], float(dist2_cv),
+    float(price), float(var_cost),
+)
+
+
+# ─────────────────────────── headline + metric switch ─────────────────────
+forecast_total = forecast_per_week * WEEKS
+best_idx = np.unravel_index(margin.argmax(), margin.shape)
+best_hold = HOLD_PCTS[best_idx[0]]
+best_st   = TARGET_STS[best_idx[1]]
+best_marg = margin[best_idx]
 
 st.markdown(
-    "<div style='display:flex; gap:14px; margin:10px 0 18px;'>"
-    + _card("Dump everything to stores", summ["dump_margin_mean"],
-            summ["dump_sellthrough"], summ["dump_lost_mean"], "#c0392b")
-    + _card(f"Keep {hold_pct}% central", summ["keep_margin_mean"],
-            summ["keep_sellthrough"], summ["keep_lost_mean"], "#1a8a4a")
-    + "</div>",
+    f"<div style='display:flex; gap:14px; margin:14px 0 4px;'>"
+    f"<div style='flex:1; border:1px solid #e3e8ef; border-radius:8px; "
+    f"padding:10px 14px; font-size:13px;'>"
+    f"<span style='color:#5a6a80;'>Forecast season total</span><br>"
+    f"<b style='font-size:18px;'>{forecast_total:,} units</b></div>"
+    f"<div style='flex:1; border:1px solid #e3e8ef; border-radius:8px; "
+    f"padding:10px 14px; font-size:13px;'>"
+    f"<span style='color:#5a6a80;'>Best cell in the table</span><br>"
+    f"<b style='font-size:18px; color:#1a8a4a;'>€{best_marg:,.0f}</b> "
+    f"<span style='color:#5a6a80;'>at hold={best_hold}%, sell-through-target={best_st}%</span></div>"
+    f"<div style='flex:1; border:1px solid #e3e8ef; border-radius:8px; "
+    f"padding:10px 14px; font-size:13px;'>"
+    f"<span style='color:#5a6a80;'>Monte-Carlo rolls per cell</span><br>"
+    f"<b style='font-size:18px;'>{R_used}</b> "
+    f"<span style='color:#5a6a80;'>(auto-scaled for {n_sku:,} SKUs × {n_store} stores)</span></div>"
+    "</div>",
     unsafe_allow_html=True,
 )
 
-# ── Distribution of the margin gap (the whole point of Monte-Carlo) ──
-edges  = summ["hist_edges"]
-counts = summ["hist_counts"]
-centers = [(edges[i] + edges[i + 1]) / 2 for i in range(len(counts))]
-width   = edges[1] - edges[0]
-df = pd.DataFrame({"gap": centers, "seasons": counts})
+metric = st.radio("Show", ["Margin (€)", "Sell-through (%)", "Lost sales (units)"],
+                  horizontal=True, key="metric")
 
-bars = (
-    alt.Chart(df)
-    .mark_bar(color="#1a8a4a", opacity=0.85)
-    .encode(
-        x=alt.X("gap:Q", title="Margin advantage of keeping central (€ per season)"),
-        y=alt.Y("seasons:Q", title="Number of rolled seasons"),
-        tooltip=[alt.Tooltip("gap:Q", format=",.0f", title="€ gap"),
-                 alt.Tooltip("seasons:Q", title="seasons")],
-    )
+
+# ─────────────────────────── render the table ─────────────────────────────
+# Heatmap via altair (no matplotlib needed). Green = better; for lost-sales,
+# lower is better, so we reverse the colour scale.
+data_for, text_fmt, prefix, suffix, reverse_color = {
+    "Margin (€)":         (margin, ",.0f", "€",  "",  False),
+    "Sell-through (%)":   (sellt,  ".1f",  "",   "%", False),
+    "Lost sales (units)": (lost,   ",.0f", "",   "",  True),
+}[metric]
+
+row_labels = [f"{h}% (DUMP)" if h == 0 else f"{h}%" for h in HOLD_PCTS]
+col_labels = [f"{s}%\n(buy {b:,})" for s, b in zip(TARGET_STS, bought_by_st)]
+
+long_rows = []
+for hi, hl in enumerate(row_labels):
+    for ti, cl in enumerate(col_labels):
+        long_rows.append({"hold": hl, "st": cl, "value": float(data_for[hi, ti])})
+df_long = pd.DataFrame(long_rows)
+
+heat = alt.Chart(df_long).mark_rect(stroke="white", strokeWidth=2).encode(
+    x=alt.X("st:O", sort=col_labels, title=None,
+            axis=alt.Axis(orient="top", labelAngle=0,
+                          labelFontSize=12, labelFontWeight="bold",
+                          labelLineHeight=14)),
+    y=alt.Y("hold:O", sort=row_labels, title="% kept central on day 1",
+            axis=alt.Axis(labelFontSize=12, labelFontWeight="bold")),
+    color=alt.Color("value:Q",
+                     scale=alt.Scale(scheme="redyellowgreen", reverse=reverse_color),
+                     legend=None),
+    tooltip=[alt.Tooltip("hold:O", title="kept central"),
+             alt.Tooltip("st:O",   title="target sell-through"),
+             alt.Tooltip("value:Q", format=text_fmt,
+                         title=f"{prefix}{metric}{suffix}".replace(' ()','').strip())],
 )
-# red colour for the (rare) seasons where dumping actually won
-neg = bars.transform_filter(alt.datum.gap < 0).mark_bar(color="#c0392b", opacity=0.85)
-zero_line = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(
-    color="#1a2a40", strokeDash=[4, 3]).encode(x="x:Q")
-mean_line = alt.Chart(pd.DataFrame({"x": [mean_gap]})).mark_rule(
-    color="#1a8a4a", size=2).encode(x="x:Q")
+labels = alt.Chart(df_long).mark_text(fontSize=12, color="#1a2a40").encode(
+    x=alt.X("st:O", sort=col_labels),
+    y=alt.Y("hold:O", sort=row_labels),
+    text=alt.Text("value:Q", format=f"{text_fmt}"),
+)
 
-st.altair_chart((bars + neg + zero_line + mean_line).properties(height=300),
-                use_container_width=True)
+st.altair_chart(
+    (heat + labels).properties(height=11 * 38 + 40,
+                                title=alt.TitleParams(
+                                    text="Target sell-through (sets how much you buy)",
+                                    fontSize=12, color="#5a6a80", anchor="middle")),
+    use_container_width=True,
+)
 
 st.caption(
-    "Each bar = how many of the rolled seasons landed in that margin-gap range. "
-    "Dashed line = break-even (left of it, in red, dumping happened to win). "
-    "Solid green line = the average. Push either volatility slider up and watch "
-    "the whole distribution slide right: the more unpredictable demand is, the "
-    "more it pays to keep stock central and react. Set both CVs to 0 and the "
-    "advantage collapses to ~0 — with nothing to react to, where stock starts "
-    "doesn't matter."
+    f"Each cell = average across {R_used} rolled seasons. Rows = % of the buy "
+    "kept at the warehouse on day 1; columns = target sell-through that fixes "
+    "how much you bought. The greenest column tends to be the leftmost (low "
+    "target = big over-buy = lots of stock = lots of margin even with waste); "
+    "the greenest **row in any column** is the lever value of keeping stock "
+    "central. Set both CVs to 0 and the colour gradient down each column "
+    "collapses — with nothing unpredictable, where stock starts doesn't matter."
 )
