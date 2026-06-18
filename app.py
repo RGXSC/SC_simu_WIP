@@ -2070,7 +2070,7 @@ def render_batch_ui():
 # SIDEBAR UI
 # ════════════════════════════════════════════════════════════════
 
-sidebar_nav("app.py")   # labeled links to the teaching pages
+sidebar_nav()   # labeled links to the teaching pages (entrypoint auto-detected)
 
 with st.sidebar:
     st.markdown("## ⚙️ Supply Chain Setup")
