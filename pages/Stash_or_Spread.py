@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import streamlit as st
 
-from sim_stash import simulate, totals, PRICE, VAR_COST, WEEKS
+from sim_stash import simulate, totals, WEEKS
 
 st.set_page_config(layout="wide", page_title="Where should the stock sit?",
                    page_icon="\U0001F4E6")
@@ -69,12 +69,34 @@ with c4:
              "below the forecast to see what under/over-buying looks like.",
     )
 
-hold_pct = st.slider(
-    "**% kept in the warehouse on day 1** \U0001F441 (the lever)",
-    min_value=0, max_value=100, value=30, step=5,
-    help="0% = all stock dumped to stores on day 1. "
-         "100% = everything kept central. The truth is somewhere in between.",
-)
+# Money parameters (second row)
+m1, m2, m3, m4 = st.columns(4)
+with m1:
+    price = st.slider(
+        "Selling price (€ / unit)",
+        min_value=1000, max_value=5000, value=2000, step=200,
+        help="What each unit sells for.",
+    )
+with m2:
+    var_cost = st.slider(
+        "Cost of goods sold (€ / unit)",
+        min_value=200, max_value=2000, value=1000, step=100,
+        help="What each unit costs you to buy.",
+    )
+with m3:
+    fix_pct = st.slider(
+        "Fixed cost (% of forecast sales)",
+        min_value=10, max_value=70, value=30, step=5,
+        help="Overheads (rent, staff, …) as a % of the total sales value you "
+             "forecast over the 26 weeks. Same for both scenarios.",
+    )
+with m4:
+    hold_pct = st.slider(
+        "**% kept central on day 1** \U0001F441 (the lever)",
+        min_value=0, max_value=100, value=30, step=5,
+        help="0% = all stock dumped to stores on day 1. "
+             "100% = everything kept central. The truth is in between.",
+    )
 
 big_share   = big_share_pct / 100.0
 forecast    = forecast_per_week * WEEKS
@@ -85,10 +107,15 @@ big_rate    = int(round(actual_per_week * big_share))
 small_rate  = int(round(actual_per_week - big_rate))  # mass-conservative
 actual_total = actual_per_week * WEEKS
 
+# Fixed cost = a % of the total sales value forecast over the season.
+forecast_sales_value = forecast * price
+fixed_cost = fix_pct / 100.0 * forecast_sales_value
+
 st.caption(
-    f"Forecast season total = **{forecast:,}** units · "
-    f"You buy **{bought:,} units** at €{VAR_COST:.0f} each = "
-    f"€{bought * VAR_COST:,.0f} of stock. "
+    f"Forecast season total = **{forecast:,}** units "
+    f"(€{forecast_sales_value:,.0f} of forecast sales) · "
+    f"You buy **{bought:,} units** at €{var_cost:,.0f} each = "
+    f"€{bought * var_cost:,.0f} of stock · Fixed cost €{fixed_cost:,.0f}. "
     f"High-selling store sells **{big_rate}/wk**, Low-selling store sells **{small_rate}/wk** "
     f"(actual season total = **{actual_total:,}**)."
 )
@@ -99,54 +126,69 @@ dump_states = simulate(bought, hold_pct=0.0,
 hold_states = simulate(bought, hold_pct=hold_pct / 100.0,
                        big_rate=big_rate, small_rate=small_rate)
 
-dump_tot = totals(dump_states)
-hold_tot = totals(hold_states)
+dump_tot = totals(dump_states, price=price, var_cost=var_cost)
+hold_tot = totals(hold_states, price=price, var_cost=var_cost)
 
 # ── Full P&L on top, one column per scenario ──────────────────────────────
-stock_cost = bought * VAR_COST
+# ONE definition of margin, used identically in the cards AND the animation:
+#   margin = sales − stock cost − fixed cost
+#   sales      = units actually sold × price
+#   stock cost = ALL units bought × cost   (you paid for the lot; leftover
+#                stock is money you didn't get back)
+#   fixed cost = scenario-independent overhead
+stock_cost = bought * var_cost
+dump_margin = dump_tot["turnover"] - stock_cost - fixed_cost
+hold_margin = hold_tot["turnover"] - stock_cost - fixed_cost
 
 
-def _pnl_pct(t):
-    """Margin as % of sales (turnover). Guards the zero-sales case."""
-    return (t["margin"] / t["turnover"] * 100.0) if t["turnover"] else 0.0
+def _row(label, value):
+    return (
+        f"<div style='display:flex; justify-content:space-between; font-size:13px; "
+        f"color:#5a6a80; padding:2px 0;'><span>{label}</span>"
+        f"<b style='color:#1a2a40;'>{value}</b></div>"
+    )
 
 
-def _pnl_card(title, t, accent):
-    mpct = _pnl_pct(t)
-    mcol = "#1a8a4a" if t["margin"] >= 0 else "#c0392b"
-    sell_through = (t["sold"] / bought * 100.0) if bought else 0.0
+def _pnl_card(title, t, margin, accent):
+    turnover     = t["turnover"]
+    sold         = t["sold"]
+    lost         = t["lost"]
+    mpct         = (margin / turnover * 100.0) if turnover else 0.0
+    mcol         = "#1a8a4a" if margin >= 0 else "#c0392b"
+    sell_through = (sold / bought * 100.0) if bought else 0.0
+    sales_str    = f"€{turnover:,.0f}  ({sold:,} sold)"
+    cost_str     = f"€{stock_cost:,.0f}"
+    fixed_str    = f"€{fixed_cost:,.0f}"
+    lost_str     = f"{lost:,} units"
+    st_str       = f"{sell_through:.0f}%"
     return (
         f"<div style='flex:1; background:#fff; border:1px solid #e6ecf2; "
         f"border-top:3px solid {accent}; border-radius:10px; padding:12px 16px;'>"
         f"<div style='font-size:12px; font-weight:700; text-transform:uppercase; "
         f"letter-spacing:.5px; color:{accent}; margin-bottom:8px;'>{title}</div>"
-        f"<div style='display:flex; justify-content:space-between; font-size:13px; "
-        f"color:#5a6a80; padding:2px 0;'><span>Sales (turnover)</span>"
-        f"<b style='color:#1a2a40;'>€{t['turnover']:,.0f}</b></div>"
-        f"<div style='display:flex; justify-content:space-between; font-size:13px; "
-        f"color:#5a6a80; padding:2px 0;'><span>Stock cost</span>"
-        f"<b style='color:#1a2a40;'>€{stock_cost:,.0f}</b></div>"
-        f"<div style='display:flex; justify-content:space-between; font-size:13px; "
-        f"color:#5a6a80; padding:2px 0;'><span>Sell-through</span>"
-        f"<b style='color:#1a2a40;'>{sell_through:.0f}%</b></div>"
+        f"{_row('Sales (turnover)', sales_str)}"
+        f"{_row('Stock cost (all bought)', cost_str)}"
+        f"{_row('Fixed cost', fixed_str)}"
+        f"{_row('Lost sales', lost_str)}"
+        f"{_row('Sell-through', st_str)}"
         f"<div style='display:flex; justify-content:space-between; align-items:baseline; "
         f"font-size:15px; padding-top:6px; margin-top:4px; "
         f"border-top:1px dashed #ecf0f4;'><span style='color:#5a6a80;'>Margin</span>"
-        f"<b style='font-size:20px; color:{mcol};'>€{t['margin']:,.0f} "
+        f"<b style='font-size:20px; color:{mcol};'>€{margin:,.0f} "
         f"<span style='font-size:14px;'>({mpct:.0f}%)</span></b></div>"
         f"</div>"
     )
 
 
 # Headline delta
-delta = hold_tot["margin"] - dump_tot["margin"]
+delta = hold_margin - dump_margin
 delta_colour = "#1a8a4a" if delta >= 0 else "#c0392b"
 delta_label = "earned" if delta >= 0 else "LOST"
 
 st.markdown(
     f"<div style='display:flex; gap:14px; margin:14px 0 6px;'>"
-    f"{_pnl_card('Dump everything to stores', dump_tot, '#c0392b')}"
-    f"{_pnl_card(f'Keep {hold_pct}% central', hold_tot, '#1a8a4a')}"
+    f"{_pnl_card('Dump everything to stores', dump_tot, dump_margin, '#c0392b')}"
+    f"{_pnl_card(f'Keep {hold_pct}% central', hold_tot, hold_margin, '#1a8a4a')}"
     f"</div>",
     unsafe_allow_html=True,
 )
@@ -179,6 +221,16 @@ def _cum_lost(states):
         out.append({"B": cum_b, "S": cum_s})
     return out
 
+# Cumulative units SOLD per week — the single source of truth for sales/margin
+# in the animation (never inferred from inventory, which can mislead).
+def _cum_sold(states):
+    c = 0
+    out = []
+    for s in states:
+        c += s.sold_big + s.sold_small
+        out.append(c)
+    return out
+
 # Tank heights are scaled to the largest value across BOTH panels so the two
 # sides remain visually comparable.
 peak = max(
@@ -193,12 +245,17 @@ payload = {
     "hold":     _states_to_json(hold_states),
     "cumDump":  _cum_lost(dump_states),
     "cumHold":  _cum_lost(hold_states),
+    "soldDump": _cum_sold(dump_states),
+    "soldHold": _cum_sold(hold_states),
     "peak":     peak,
     "weeks":    WEEKS,
     "bigRate":  big_rate,
     "smallRate": small_rate,
     "holdPct":  hold_pct,
     "bought":   bought,
+    "price":    price,
+    "vc":       var_cost,
+    "fixed":    fixed_cost,
 }
 
 # ── Animation component ───────────────────────────────────────────────────
@@ -396,8 +453,9 @@ HTML = """
     <span class="stuck">Stuck stock at W26:</span> <span id="dump-stuck">0</span>
   </div>
   <div class="pnl">
-    <div class="pnl-row"><span>Turnover (sold × €__PRICE__)</span><b>€<span id="dump-turn">0</span></b></div>
+    <div class="pnl-row"><span>Sales (sold × €__PRICE__)</span><b>€<span id="dump-turn">0</span></b></div>
     <div class="pnl-row"><span>Stock cost (bought × €__VC__)</span><b>€<span id="dump-cost">0</span></b></div>
+    <div class="pnl-row"><span>Fixed cost</span><b>€<span id="dump-fixed">0</span></b></div>
     <div class="pnl-row margin"><span>Margin</span><b>€<span id="dump-margin">0</span></b></div>
   </div>
 </div>
@@ -445,8 +503,9 @@ HTML = """
     <span class="stuck">Stuck stock at W26:</span> <span id="hold-stuck">0</span>
   </div>
   <div class="pnl">
-    <div class="pnl-row"><span>Turnover (sold × €__PRICE__)</span><b>€<span id="hold-turn">0</span></b></div>
+    <div class="pnl-row"><span>Sales (sold × €__PRICE__)</span><b>€<span id="hold-turn">0</span></b></div>
     <div class="pnl-row"><span>Stock cost (bought × €__VC__)</span><b>€<span id="hold-cost">0</span></b></div>
+    <div class="pnl-row"><span>Fixed cost</span><b>€<span id="hold-fixed">0</span></b></div>
     <div class="pnl-row margin"><span>Margin</span><b>€<span id="hold-margin">0</span></b></div>
   </div>
 </div>
@@ -464,8 +523,8 @@ HTML = """
 
 <script>
 const DATA = __PAYLOAD__;
-const PRICE = __PRICE__;
-const VC    = __VC__;
+const PRICE = DATA.price;
+const VC    = DATA.vc;
 const peak  = DATA.peak;
 const WK    = DATA.weeks;
 const MS_PER_WEEK = 2000;   // 2 sec per week, requested pacing
@@ -554,48 +613,29 @@ function renderAll(week, flyPackages) {
   renderPanel("hold", DATA.hold, DATA.cumHold, week, flyPackages);
   document.getElementById("hold-pct-readout").textContent = DATA.holdPct;
 
-  // P&L numbers
-  const showFinal = (week === WK);
-  function updatePnl(prefix, states, cum) {
-    const fin  = states[WK];
-    if (showFinal) {
-      const sold = (DATA.bought) - (fin.wh + fin.big + fin.small);
-      const lost = cum[WK].B + cum[WK].S;
-      const turn = sold * PRICE;
-      const cost = DATA.bought * VC;
-      const margin = turn - cost;
-      document.getElementById(prefix + "-turn").textContent   = turn.toLocaleString();
-      document.getElementById(prefix + "-cost").textContent   = cost.toLocaleString();
-      document.getElementById(prefix + "-margin").textContent = margin.toLocaleString();
-      const mrow = document.getElementById(prefix + "-margin").parentElement;
-      mrow.classList.toggle("positive", margin >= 0);
-      mrow.classList.toggle("negative", margin <  0);
-      document.getElementById(prefix + "-lost-tot").textContent = lost;
-      document.getElementById(prefix + "-stuck").textContent =
-        (fin.wh + fin.big + fin.small);
-    } else {
-      // Running cumulative sold & lost during the animation
-      let runSold = 0;
-      for (let w = 1; w <= week; w++) {
-        runSold += states[w].soldB + states[w].soldS;
-      }
-      document.getElementById(prefix + "-turn").textContent =
-        (runSold * PRICE).toLocaleString();
-      document.getElementById(prefix + "-cost").textContent =
-        (DATA.bought * VC).toLocaleString();
-      const m = runSold * PRICE - DATA.bought * VC;
-      document.getElementById(prefix + "-margin").textContent = m.toLocaleString();
-      const mrow = document.getElementById(prefix + "-margin").parentElement;
-      mrow.classList.toggle("positive", m >= 0);
-      mrow.classList.toggle("negative", m <  0);
-      document.getElementById(prefix + "-lost-tot").textContent =
-        (cum[week].B + cum[week].S);
-      document.getElementById(prefix + "-stuck").textContent =
-        (states[week].wh + states[week].big + states[week].small);
-    }
+  // P&L numbers — ONE formula, identical to the Python cards:
+  //   sales  = cumulative units sold (NEVER inferred from inventory) × price
+  //   margin = sales − (all units bought × cost) − fixed cost
+  // Stock cost and fixed cost are charged in full from week 0 (cash already
+  // committed), so the running margin starts negative and climbs as sales land.
+  const stockCost = DATA.bought * VC;
+  function updatePnl(prefix, states, cum, soldArr) {
+    const sold   = soldArr[week];
+    const turn   = sold * PRICE;
+    const margin = turn - stockCost - DATA.fixed;
+    const onHand = states[week].wh + states[week].big + states[week].small;
+    document.getElementById(prefix + "-turn").textContent   = Math.round(turn).toLocaleString();
+    document.getElementById(prefix + "-cost").textContent   = Math.round(stockCost).toLocaleString();
+    document.getElementById(prefix + "-fixed").textContent  = Math.round(DATA.fixed).toLocaleString();
+    document.getElementById(prefix + "-margin").textContent = Math.round(margin).toLocaleString();
+    const mrow = document.getElementById(prefix + "-margin").parentElement;
+    mrow.classList.toggle("positive", margin >= 0);
+    mrow.classList.toggle("negative", margin <  0);
+    document.getElementById(prefix + "-lost-tot").textContent = cum[week].B + cum[week].S;
+    document.getElementById(prefix + "-stuck").textContent    = onHand;
   }
-  updatePnl("dump", DATA.dump, DATA.cumDump);
-  updatePnl("hold", DATA.hold, DATA.cumHold);
+  updatePnl("dump", DATA.dump, DATA.cumDump, DATA.soldDump);
+  updatePnl("hold", DATA.hold, DATA.cumHold, DATA.soldHold);
 }
 
 // Initial state = end-of-season (so the page renders the headline view on load)
@@ -668,8 +708,8 @@ playBtn.addEventListener("click", play);
 
 html = (HTML
         .replace("__PAYLOAD__", json.dumps(payload))
-        .replace("__PRICE__",   str(PRICE))
-        .replace("__VC__",      str(VAR_COST))
+        .replace("__PRICE__",   f"{price:,.0f}")
+        .replace("__VC__",      f"{var_cost:,.0f}")
         .replace("__WEEKS__",   str(WEEKS))
         .replace("__BIG__",     str(big_rate))
         .replace("__SMALL__",   str(small_rate)))

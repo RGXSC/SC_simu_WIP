@@ -37,8 +37,14 @@ class WeekState:
 
 
 def _step(wh, big, small, in_big, in_small, can_replenish: bool,
-          big_rate: int, small_rate: int):
-    """Run one week. Returns (new state values, sales/lost split)."""
+          big_rate: int, small_rate: int, place_orders: bool = True):
+    """Run one week. Returns (new state values, sales/lost split).
+
+    place_orders: when False (the final week) the warehouse places no new
+    shipment. Orders take a week to arrive, so anything shipped on the last
+    week would never land — leaving it 'in transit' would silently lose
+    those units from the inventory accounting (sold + on-hand != bought).
+    """
     # 1. Arrivals from last week's order (1-wk LT)
     big   += in_big
     small += in_small
@@ -55,7 +61,7 @@ def _step(wh, big, small, in_big, in_small, can_replenish: bool,
     # In the 'dump-everything' policy the warehouse is empty and there
     # is nothing to send — we just leave the orders at 0.
     new_in_big = new_in_small = 0
-    if can_replenish and wh > 0:
+    if place_orders and can_replenish and wh > 0:
         target_big   = big_rate   * COVER_TARGET_WEEKS
         target_small = small_rate * COVER_TARGET_WEEKS
         need_big   = max(0, target_big   - big   - in_big)
@@ -93,25 +99,38 @@ def simulate(bought: int, hold_pct: float,
     states: list[WeekState] = [
         WeekState(wh, big, small, 0, 0, 0, 0, 0, 0)  # W0 = pre-sales snapshot
     ]
-    for _ in range(WEEKS):
+    for w in range(WEEKS):
+        # No new order on the final week — it could never arrive (1-wk LT),
+        # so it would strand units in transit and break mass conservation.
+        place_orders = (w < WEEKS - 1)
         wh, big, small, sb, ss, lb, ls, in_big, in_small = _step(
             wh, big, small, in_big, in_small, can_replenish,
-            big_rate, small_rate)
+            big_rate, small_rate, place_orders)
         states.append(WeekState(wh, big, small, sb, ss, lb, ls, in_big, in_small))
     return states
 
 
-def totals(states: list[WeekState]) -> dict:
-    """Cumulative metrics for the P&L line."""
+def totals(states: list[WeekState],
+           price: float = PRICE, var_cost: float = VAR_COST) -> dict:
+    """Cumulative metrics for the P&L line.
+
+    price / var_cost are passed in so the page can drive them from sliders.
+    Stock cost charges the WHOLE buy (sold + stuck = bought) at var_cost.
+    'gross_margin' is before fixed costs; the page subtracts fixed cost to
+    get the net margin (fixed cost is scenario-independent).
+    """
     sold  = sum(s.sold_big + s.sold_small for s in states)
     lost  = sum(s.lost_big + s.lost_small for s in states)
     stuck = states[-1].wh + states[-1].big + states[-1].small
+    turnover = sold * price
+    cogs     = (sold + stuck) * var_cost
     return {
         "sold":  sold,
         "lost":  lost,
         "stuck": stuck,
-        "turnover": sold * PRICE,
-        "margin":   sold * PRICE - (sold + stuck) * VAR_COST,
+        "turnover": turnover,
+        "cogs": cogs,
+        "gross_margin": turnover - cogs,
         # Lost sales valued at MARGIN, not turnover — the "what you could have earned"
-        "lost_value": lost * (PRICE - VAR_COST),
+        "lost_value": lost * (price - var_cost),
     }
