@@ -47,11 +47,12 @@ with c1:
              "stock to buy for the 26-week season.",
     )
 with c2:
-    stock_pct = st.slider(
-        "Bought as % of forecast",
-        min_value=50, max_value=200, value=80, step=5,
-        help="How much stock you actually buy. 100% = buy exactly the forecast. "
-             "Go up to 200% to overstock on purpose.",
+    target_sell_through = st.slider(
+        "Target sell-through for buy (%)",
+        min_value=10, max_value=100, value=80, step=5,
+        help="How much of the bought stock you aim to actually sell — this sets "
+             "how much you buy. 100% = buy exactly the forecast. 50% = buy double "
+             "the forecast (you only expect to sell half).",
     )
 with c3:
     big_share_pct = st.slider(
@@ -77,7 +78,9 @@ hold_pct = st.slider(
 
 big_share   = big_share_pct / 100.0
 forecast    = forecast_per_week * WEEKS
-bought      = int(round(forecast * stock_pct / 100))
+# Buy is set by the target sell-through: bought = forecast / target.
+# 100% target -> buy the forecast; 50% target -> buy double the forecast.
+bought      = int(round(forecast * 100 / target_sell_through))
 big_rate    = int(round(actual_per_week * big_share))
 small_rate  = int(round(actual_per_week - big_rate))  # mass-conservative
 actual_total = actual_per_week * WEEKS
