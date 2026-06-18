@@ -100,17 +100,59 @@ hold_states = simulate(bought, hold_pct=hold_pct / 100.0,
 dump_tot = totals(dump_states)
 hold_tot = totals(hold_states)
 
-# Headline delta (above the visualisation)
+# ── Full P&L on top, one column per scenario ──────────────────────────────
+stock_cost = bought * VAR_COST
+
+
+def _pnl_pct(t):
+    """Margin as % of sales (turnover). Guards the zero-sales case."""
+    return (t["margin"] / t["turnover"] * 100.0) if t["turnover"] else 0.0
+
+
+def _pnl_card(title, t, accent):
+    mpct = _pnl_pct(t)
+    mcol = "#1a8a4a" if t["margin"] >= 0 else "#c0392b"
+    sell_through = (t["sold"] / bought * 100.0) if bought else 0.0
+    return (
+        f"<div style='flex:1; background:#fff; border:1px solid #e6ecf2; "
+        f"border-top:3px solid {accent}; border-radius:10px; padding:12px 16px;'>"
+        f"<div style='font-size:12px; font-weight:700; text-transform:uppercase; "
+        f"letter-spacing:.5px; color:{accent}; margin-bottom:8px;'>{title}</div>"
+        f"<div style='display:flex; justify-content:space-between; font-size:13px; "
+        f"color:#5a6a80; padding:2px 0;'><span>Sales (turnover)</span>"
+        f"<b style='color:#1a2a40;'>€{t['turnover']:,.0f}</b></div>"
+        f"<div style='display:flex; justify-content:space-between; font-size:13px; "
+        f"color:#5a6a80; padding:2px 0;'><span>Stock cost</span>"
+        f"<b style='color:#1a2a40;'>€{stock_cost:,.0f}</b></div>"
+        f"<div style='display:flex; justify-content:space-between; font-size:13px; "
+        f"color:#5a6a80; padding:2px 0;'><span>Sell-through</span>"
+        f"<b style='color:#1a2a40;'>{sell_through:.0f}%</b></div>"
+        f"<div style='display:flex; justify-content:space-between; align-items:baseline; "
+        f"font-size:15px; padding-top:6px; margin-top:4px; "
+        f"border-top:1px dashed #ecf0f4;'><span style='color:#5a6a80;'>Margin</span>"
+        f"<b style='font-size:20px; color:{mcol};'>€{t['margin']:,.0f} "
+        f"<span style='font-size:14px;'>({mpct:.0f}%)</span></b></div>"
+        f"</div>"
+    )
+
+
+# Headline delta
 delta = hold_tot["margin"] - dump_tot["margin"]
 delta_colour = "#1a8a4a" if delta >= 0 else "#c0392b"
 delta_label = "earned" if delta >= 0 else "LOST"
+
 st.markdown(
-    f"<div style='background:#fff; border:1px solid #e6ecf2; border-radius:10px; "
-    f"padding:14px 18px; text-align:center; margin:14px 0 18px;'>"
-    f"<span style='color:#5a6a80; font-size:13px;'>"
-    f"Keeping {hold_pct}% in the warehouse vs dumping everything to shops:</span>"
-    f"<span style='font-size:28px; font-weight:700; color:{delta_colour}; "
-    f"margin-left:14px;'>{delta_label} €{abs(delta):,.0f}</span></div>",
+    f"<div style='display:flex; gap:14px; margin:14px 0 6px;'>"
+    f"{_pnl_card('Dump everything to shops', dump_tot, '#c0392b')}"
+    f"{_pnl_card(f'Keep {hold_pct}% central', hold_tot, '#1a8a4a')}"
+    f"</div>",
+    unsafe_allow_html=True,
+)
+st.markdown(
+    f"<div style='text-align:center; font-size:14px; color:#5a6a80; margin:0 0 16px;'>"
+    f"Keeping {hold_pct}% central vs dumping everything: "
+    f"<b style='font-size:22px; color:{delta_colour};'>"
+    f"{delta_label} €{abs(delta):,.0f}</b> of margin</div>",
     unsafe_allow_html=True,
 )
 
@@ -288,6 +330,8 @@ HTML = """
   .play.playing { background: #c97a2c; }
   .week-readout { font-size: 13px; color:#5a6a80; min-width: 80px; }
   .week-readout b { color:#1a2a40; font-size: 14px; }
+  .speed-label { font-size: 13px; color:#5a6a80; white-space: nowrap; }
+  .speed-label b { color:#1a2a40; }
   input[type=range] { flex: 1; accent-color: #1a2a40; }
   .pnl { margin-top: 14px; border-top: 1px solid #ecf0f4; padding-top: 10px; }
   .pnl-row { display: flex; justify-content: space-between;
@@ -411,6 +455,9 @@ HTML = """
   <button id="play" class="play">▶ Play</button>
   <span class="week-readout">Week <b id="weekRead">0</b> / __WEEKS__</span>
   <input type="range" id="scrub" min="0" max="__WEEKS__" value="0" step="1">
+  <span class="speed-label">🐢</span>
+  <input type="range" id="speed" min="0.25" max="4" value="1" step="0.25" style="flex:0 0 120px;">
+  <span class="speed-label">🐇 <b id="speedRead">1.0×</b></span>
 </div>
 
 <script>
@@ -552,11 +599,20 @@ function renderAll(week, flyPackages) {
 // Initial state = end-of-season (so the page renders the headline view on load)
 renderAll(WK, false);
 
-const playBtn = document.getElementById("play");
-const scrub   = document.getElementById("scrub");
+const playBtn  = document.getElementById("play");
+const scrub    = document.getElementById("scrub");
+const speedEl  = document.getElementById("speed");
+const speedRead = document.getElementById("speedRead");
 
 let playing = false;
 let raf = null;
+
+// Speed multiplier (1× = the requested 2 s/week). Read live so dragging the
+// slider mid-film speeds it up / slows it down immediately.
+function speedMult() { return parseFloat(speedEl.value); }
+function showSpeed() { speedRead.textContent = speedMult().toFixed(2).replace(/0$/, "") + "×"; }
+speedEl.addEventListener("input", showSpeed);
+showSpeed();
 
 scrub.addEventListener("input", e => {
   // Scrubbing always cancels Play (clean state) and never triggers packages.
@@ -571,20 +627,24 @@ function play() {
   playing = true;
   playBtn.classList.add("playing");
   playBtn.textContent = "⏸ Pause";
-  const start = performance.now();
-  const total_ms = WK * MS_PER_WEEK;
-  let lastWeek = -1;
+  // Accumulate elapsed time in "week units" so the live speed slider applies
+  // mid-film: each frame advances weekFloat by dt / (current ms-per-week).
+  let weekFloat = 0;
+  let lastWeek  = -1;
+  let lastTime  = performance.now();
   renderAll(0, false);
   function frame(now) {
     if (!playing) return;
-    const t = Math.min(1, (now - start) / total_ms);
-    const w = Math.min(WK, Math.floor(t * WK));
+    const dt = now - lastTime;
+    lastTime = now;
+    weekFloat += dt / (MS_PER_WEEK / speedMult());
+    const w = Math.min(WK, Math.floor(weekFloat));
     if (w !== lastWeek) {
       // Pass flyPackages=true so each new week kicks off the flying chip.
       renderAll(w, true);
       lastWeek = w;
     }
-    if (t < 1) {
+    if (weekFloat < WK) {
       raf = requestAnimationFrame(frame);
     } else {
       renderAll(WK, false);
