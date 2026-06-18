@@ -17,6 +17,7 @@ import pandas as pd
 import streamlit as st
 
 from sim_nstores import simulate_mc, summarise, WEEKS
+from ui_nav import top_nav
 
 st.set_page_config(layout="wide", page_title="Central stock under uncertainty",
                    page_icon="\U0001F3B2")
@@ -27,6 +28,8 @@ st.markdown("""
 section[data-testid="stSidebar"] { width: 0 !important; min-width: 0 !important; }
 </style>
 """, unsafe_allow_html=True)
+
+top_nav("pages/Monte_Carlo.py")
 
 st.markdown(
     "<h1 style='margin:0 0 4px 0; font-size:28px;'>\U0001F3B2 "

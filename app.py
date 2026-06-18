@@ -36,6 +36,7 @@ import pandas as pd
 import numpy as np
 from math import gamma as gamma_fn, exp as math_exp
 from datetime import datetime
+from ui_nav import sidebar_nav
 
 st.set_page_config(layout="wide", page_title="Supply Chain Agility Simulator", page_icon="\U0001f3ed")
 
@@ -2068,6 +2069,8 @@ def render_batch_ui():
 # ════════════════════════════════════════════════════════════════
 # SIDEBAR UI
 # ════════════════════════════════════════════════════════════════
+
+sidebar_nav("app.py")   # labeled links to the teaching pages
 
 with st.sidebar:
     st.markdown("## ⚙️ Supply Chain Setup")

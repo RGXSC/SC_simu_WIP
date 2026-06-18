@@ -14,6 +14,7 @@ import json
 import streamlit as st
 
 from sim_stash import simulate, totals, WEEKS
+from ui_nav import top_nav
 
 st.set_page_config(layout="wide", page_title="Where should the stock sit?",
                    page_icon="\U0001F4E6")
@@ -24,6 +25,8 @@ st.markdown("""
 section[data-testid="stSidebar"] { width: 0 !important; min-width: 0 !important; }
 </style>
 """, unsafe_allow_html=True)
+
+top_nav("pages/Stash_or_Spread.py")
 
 st.markdown(
     "<h1 style='margin:0 0 4px 0; font-size:28px;'>\U0001F4E6 "

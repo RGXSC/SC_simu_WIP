@@ -23,6 +23,8 @@ import sim_regional as sim
 from sim_common import seasonal_curve, seasonal_curve_float, TIER_SHARE
 
 st.set_page_config(layout="wide", page_title="Regional 2-RW Simulator", page_icon="\U0001F30D")
+from ui_nav import top_nav
+top_nav("pages/Regional.py")
 st.title("\U0001F30D  Regional 2-RW Simulator")
 st.caption("Chain: Supplier → Material → Semi → FP → **CW → RW A / RW B → Stores**. "
            "Planner discovers the regional demand split at the first review.")
