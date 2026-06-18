@@ -118,7 +118,8 @@ class MCResult:
 # ───────────────────────────── the engine ──────────────────────────────
 
 def _run_policy(rate: np.ndarray, store0: np.ndarray, wh0: np.ndarray,
-                replenish: bool, check_invariants: bool = True):
+                replenish: bool, check_invariants: bool = True,
+                min_floor: float = 0.0):
     """Simulate every (run, SKU, store) for WEEKS weeks under one policy.
 
     rate   : (R, K, M) flat weekly sell-rate per cell.
@@ -131,13 +132,20 @@ def _run_policy(rate: np.ndarray, store0: np.ndarray, wh0: np.ndarray,
 
     Returns (sold, lost, stuck) — each summed to a per-run total (R,).
     """
-    stores      = store0.astype(float).copy()
-    wh          = wh0.astype(float).copy()
+    # Preserve the caller's dtype: the table path passes float32 (bandwidth-
+    # bound, ~2x faster, half the memory) while the invariant-checked smoke
+    # path passes float64 for exact mass-conservation asserts.
+    dt = np.result_type(store0.dtype, rate.dtype)
+    stores      = store0.astype(dt).copy()
+    wh          = wh0.astype(dt).copy()
     in_transit  = np.zeros_like(stores)
-    target      = rate * COVER_TARGET_WEEKS          # (R,K,M), flat → constant
+    # Replenish target = 2 weeks of cover, but never below the forced
+    # presentation minimum (min_floor units per store of each SKU). The
+    # warehouse keeps every store topped to at least that floor.
+    target = np.maximum(rate * COVER_TARGET_WEEKS, min_floor).astype(dt)   # (R,K,M)
 
-    sold_tot = np.zeros(rate.shape[0])
-    lost_tot = np.zeros(rate.shape[0])
+    sold_tot = np.zeros(rate.shape[0], dtype=dt)
+    lost_tot = np.zeros(rate.shape[0], dtype=dt)
 
     for w in range(WEEKS):
         # 1. arrivals from last week's order (1-wk lead time)
@@ -181,6 +189,7 @@ def simulate_mc(forecast_per_week: float,
                 n_store: int,
                 hold_pct: float,
                 target_sell_through: float,
+                min_per_store: float = 0.0,
                 dist1_family: str = "lognormal", dist1_cv: float = 0.6,
                 dist2_family: str = "lognormal", dist2_cv: float = 0.6,
                 runs: int = 10_000,
@@ -194,37 +203,55 @@ def simulate_mc(forecast_per_week: float,
     forecast_per_week  : assortment-wide forecast units/week (all SKUs+stores).
     hold_pct           : 0..1 fraction kept central in the KEEP policy.
     target_sell_through: 0..1; total buy = forecast_total / target.
+    min_per_store      : forced presentation stock — every store must hold at
+                         least this many units of EVERY SKU. Seeded on day 1
+                         and maintained by the warehouse. If the implied floor
+                         (min_per_store × n_sku × n_store) exceeds the
+                         forecast-based buy, the buy is raised to honour it —
+                         which is exactly how broad presentation minimums blow
+                         up the buy across a large assortment.
     dist*_cv           : coefficient of variation of each mean-1 noise source.
     """
     rng = np.random.default_rng(seed)
     R, K, M = runs, int(n_sku), int(n_store)
+    # float64 when we assert exact conservation, float32 for the fast sweep.
+    work_dtype = np.float64 if check_invariants else np.float32
 
     # ── demand draws (flat across weeks; held per run) ──
     baseline = forecast_per_week / (K * M)
     sku_strength = draw_mean1(rng, dist1_family, dist1_cv, (R, K, 1))     # per SKU
     store_share  = draw_mean1(rng, dist2_family, dist2_cv, (R, K, M))     # per cell
-    rate = baseline * sku_strength * store_share                         # (R,K,M)
+    rate = (baseline * sku_strength * store_share).astype(work_dtype)    # (R,K,M)
 
     # ── the buy (one planning number, identical across runs) ──
     forecast_total = forecast_per_week * WEEKS
-    bought = int(round(forecast_total / max(target_sell_through, 1e-9)))
-    # Split equally across cells — the buyer's uniform prior. Each SKU gets an
-    # equal slice; KEEP holds hold_pct of that slice central.
-    buy_per_sku  = bought / K
-    wh_per_sku   = buy_per_sku * hold_pct
-    to_stores_k  = buy_per_sku - wh_per_sku
-    per_store    = to_stores_k / M
+    forecast_buy   = int(round(forecast_total / max(target_sell_through, 1e-9)))
+    # Forced presentation stock locks min_per_store units in every (SKU, store).
+    # The buy can never be smaller than that floor — if it would be, presentation
+    # has overridden the forecast and we buy up to the floor.
+    forced_total = int(round(min_per_store * K * M))
+    bought       = max(forecast_buy, forced_total)
 
-    store0 = np.full((R, K, M), per_store)
-    # DUMP: nothing central, whole slice spread into stores.
-    dump_store0 = np.full((R, K, M), buy_per_sku / M)
-    dump_wh0    = np.zeros((R, K))
-    keep_wh0    = np.full((R, K), wh_per_sku)
+    # Split equally across cells — the buyer's uniform prior. Every store is
+    # first seeded with the forced minimum; only the FREE remainder is subject
+    # to the hold-central lever.
+    buy_per_sku   = bought / K
+    forced_per_sku = min_per_store * M
+    free_per_sku  = buy_per_sku - forced_per_sku          # ≥ 0 by construction
+    wh_per_sku    = free_per_sku * hold_pct               # only free stock held
+    keep_per_store = min_per_store + (free_per_sku - wh_per_sku) / M
+
+    store0 = np.full((R, K, M), keep_per_store, dtype=work_dtype)
+    # DUMP: nothing central, whole slice spread into stores (already ≥ floor).
+    dump_store0 = np.full((R, K, M), buy_per_sku / M, dtype=work_dtype)
+    dump_wh0    = np.zeros((R, K), dtype=work_dtype)
+    keep_wh0    = np.full((R, K), wh_per_sku, dtype=work_dtype)
 
     if compute_dump:
         d_sold, d_lost, d_stuck = _run_policy(rate, dump_store0, dump_wh0,
                                               replenish=False,
-                                              check_invariants=check_invariants)
+                                              check_invariants=check_invariants,
+                                              min_floor=min_per_store)
     else:
         # NaN, not 0, so any downstream code that forgets to gate on
         # compute_dump (e.g. MCResult.gap) loudly produces NaN rather than
@@ -232,7 +259,8 @@ def simulate_mc(forecast_per_week: float,
         d_sold = d_lost = d_stuck = np.full(R, np.nan)
     k_sold, k_lost, k_stuck = _run_policy(rate, store0, keep_wh0,
                                           replenish=True,
-                                          check_invariants=check_invariants)
+                                          check_invariants=check_invariants,
+                                          min_floor=min_per_store)
 
     # ── conservation invariant (bought == sold + on-hand, per run) ──
     if check_invariants:

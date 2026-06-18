@@ -69,18 +69,29 @@ with c1:
         help="Total weekly sales you THINK you'll do across every SKU and store. "
              "Drives how much you buy for the season.")
 with c2:
-    n_sku = st.slider("Number of SKUs", min_value=50, max_value=2000,
+    n_sku = st.slider("Number of SKUs", min_value=50, max_value=1000,
                       value=200, step=50,
                       help="How many distinct products share the buy. "
                            "You can't know up front which will be the winners.")
 with c3:
-    n_store = st.slider("Number of stores", min_value=2, max_value=60,
-                        value=20, step=1)
+    n_store = st.slider("Number of stores", min_value=2, max_value=500,
+                        value=20, step=1,
+                        help="How many stores share the assortment. Big store "
+                             "counts make presentation minimums expensive (see below).")
 with c4:
     price    = st.number_input("Selling price (€ / unit)",
                                min_value=1, max_value=200, value=10, step=1)
     var_cost = st.number_input("Cost of goods (€ / unit)",
                                min_value=1, max_value=200, value=5, step=1)
+
+min_per_store = st.slider(
+    "Force units per store of each SKU  (presentation minimum)",
+    min_value=0, max_value=10, value=0, step=1,
+    help="Every store must hold at least this many units of EVERY SKU on the "
+         "shelf — merchandising / assortment-breadth minimum. Seeded on day 1 "
+         "and kept topped up by the warehouse. With many SKUs × many stores "
+         "this floor (min × SKUs × stores) can dwarf the forecast-based buy and "
+         "force you to over-buy massively. 0 = off.")
 
 st.markdown(
     "<div style='font-size:13px; color:#5a6a80; margin:10px 0 2px;'>"
@@ -159,17 +170,17 @@ with prev2:
 
 # ─────────────────────────── table compute ────────────────────────────────
 @st.cache_data(show_spinner="Computing the table (one-time, then cached)…")
-def _compute_table(forecast: int, n_sku: int, n_store: int,
+def _compute_table(forecast: int, n_sku: int, n_store: int, min_per_store: int,
                    d1_fam: str, d1_cv: float, d2_fam: str, d2_cv: float,
                    price: float, var_cost: float):
     """Sweep HOLD_PCTS x TARGET_STS, return (margin, sellthrough, lost, bought).
 
-    Runs auto-scale: budget ~1.5M (run, SKU, store) cells per call. At the
-    default 200 SKUs / 20 stores that gives R=100; at the 2000-SKU/60-store
-    extreme it floors at R=20 (per-run mean over 120k samples is already
-    very stable, so MC noise is tiny).
+    Runs auto-scale on a ~2M (run, SKU, store) budget: R=100 at the default
+    200 SKUs / 20 stores, flooring at R=6 for the 1000-SKU / 500-store extreme.
+    Even at R=6 each per-run mean averages 500k cells, so MC noise is tiny —
+    and the floor keeps peak memory (≈ R·SKU·store float32) bounded.
     """
-    R = max(20, min(100, int(1_500_000 / (n_sku * n_store))))
+    R = int(np.clip(2_000_000 // max(n_sku * n_store, 1), 6, 100))
     margin = np.zeros((len(HOLD_PCTS), len(TARGET_STS)))
     sellt  = np.zeros_like(margin)
     lost   = np.zeros_like(margin)
@@ -181,6 +192,7 @@ def _compute_table(forecast: int, n_sku: int, n_store: int,
                 forecast_per_week=forecast, n_sku=n_sku, n_store=n_store,
                 hold_pct=hold / 100.0,
                 target_sell_through=st_pct / 100.0,
+                min_per_store=float(min_per_store),
                 dist1_family=d1_fam, dist1_cv=d1_cv,
                 dist2_family=d2_fam, dist2_cv=d2_cv,
                 runs=R, price=price, var_cost=var_cost, seed=0,
@@ -193,12 +205,34 @@ def _compute_table(forecast: int, n_sku: int, n_store: int,
     return margin, sellt, lost, bought_by_st, R
 
 
+# Warn before a heavy compute so the user isn't surprised by a long first run.
+_cells = int(n_sku) * int(n_store)
+if _cells > 150_000:
+    st.info(f"Large assortment ({n_sku:,} SKUs × {n_store} stores = "
+            f"{_cells:,} cells). The first computation may take up to a minute; "
+            "it is then cached until you change a setting.", icon="⏳")
+elif _cells > 30_000:
+    st.info(f"Sizeable assortment ({_cells:,} cells). First computation may "
+            "take ~20s, then it is cached.", icon="⏳")
+
 margin, sellt, lost, bought_by_st, R_used = _compute_table(
-    int(forecast_per_week), int(n_sku), int(n_store),
+    int(forecast_per_week), int(n_sku), int(n_store), int(min_per_store),
     _FAMILIES[dist1_label], float(dist1_cv),
     _FAMILIES[dist2_label], float(dist2_cv),
     float(price), float(var_cost),
 )
+
+# Surface when the presentation minimum has overridden the forecast-based buy.
+forced_total = int(min_per_store) * int(n_sku) * int(n_store)
+if min_per_store > 0 and forced_total > bought_by_st.min():
+    st.warning(
+        f"**Presentation minimum is binding.** Forcing {min_per_store} unit(s) "
+        f"per store of every SKU locks **{forced_total:,} units** "
+        f"({min_per_store} × {n_sku:,} SKUs × {n_store} stores). Where that "
+        "exceeds the forecast-based buy, the buy is raised to honour it — so "
+        "you over-buy, sell-through drops, and the hold-central lever loses "
+        "its room to manoeuvre (there is no free stock left to position).",
+        icon="📦")
 
 
 # ─────────────────────────── headline + metric switch ─────────────────────
