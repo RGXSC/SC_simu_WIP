@@ -12,7 +12,6 @@ actual demand/wk, and the headline lever — % kept central on day 1.
 from __future__ import annotations
 import json
 import streamlit as st
-import streamlit.components.v1 as components
 
 from sim_stash import simulate, totals, PRICE, VAR_COST, WEEKS
 
@@ -672,7 +671,7 @@ html = (HTML
         .replace("__BIG__",     str(big_rate))
         .replace("__SMALL__",   str(small_rate)))
 
-components.html(html, height=720, scrolling=False)
+st.iframe(html, height=720)
 
 # ── Footer hint ─────────────────────────────────────────────────────────
 st.markdown(

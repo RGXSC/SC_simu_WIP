@@ -1266,7 +1266,7 @@ def reconciliation_report(states, kpis, params):
 #   - No black contours — fill-only, borderless, rounded 6px.
 #   - Arial font throughout; grey-blue neutral palette.
 #   - CARD_W (supplier/store) = 98px; week-box width adaptive.
-#   - Exactly one `st.components.v1.html` call at render time (see main page).
+#   - Exactly one `st.iframe` call at render time (see main page).
 #   - JS wrapper scales the diagram to fit parent width via transform:scale().
 
 # --- Palette ---
@@ -1464,7 +1464,7 @@ def make_sc_html(state: dict, params: dict) -> str:
     Stages are always in a single horizontal row; weeks within a stage wrap
     after MAX_PER_ROW. Stores are stacked vertically on the right.
 
-    Returns a single HTML string (one st.components.v1.html call expected).
+    Returns a single HTML string (one st.iframe call expected).
     """
     mat_lt  = params['mat_lt']
     semi_lt = params['semi_lt']
@@ -2517,7 +2517,7 @@ with k6:
     st.markdown(_kpi_card("Useful Prod.",   f"{uf:.0f}%", uc), unsafe_allow_html=True)
 
 
-# --- SC flow diagram (exactly one st.components.v1.html call) ---
+# --- SC flow diagram (exactly one st.iframe call) ---
 st.markdown("")
 _max_stage = max(params['mat_lt'], params['semi_lt'], params['fp_lt'], params['dist_lt'])
 _rows_needed = math.ceil(_max_stage / MAX_PER_ROW)
@@ -2550,7 +2550,7 @@ if _pf is not None:
         unsafe_allow_html=True,
     )
 
-st.components.v1.html(make_sc_html(state, params), height=_viz_h, scrolling=False)
+st.iframe(make_sc_html(state, params), height=_viz_h)
 
 
 # --- Per-store zoom — session-state-controlled toggle (doesn't close on
