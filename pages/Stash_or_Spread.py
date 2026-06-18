@@ -1,13 +1,13 @@
 """'Where should the stock sit?' — a teaching page for non-SC people.
 
-One lesson: dumping all your stock into shops on day 1 leaves it stuck
-in the small shop and missing in the big one. Keep some central and
-the warehouse feeds whoever is actually selling.
+One lesson: dumping all your stock into stores on day 1 leaves it stuck
+in the low-selling store and missing in the high-selling one. Keep some
+central and the warehouse feeds whoever is actually selling.
 
 UI: two side-by-side animated panels (one per policy). Warehouse sits on
-top, the two shops below; weekly shipments appear as little flying
-packages between them. Inputs: forecast/wk, buy %, big-shop share %,
-actual demand/wk, and the headline lever — % kept central on day 1.
+top, the two stores below; weekly shipments appear as little flying
+packages between them. Inputs: forecast/wk, sell-through %, high-selling
+store share %, actual demand/wk, and the lever — % kept central on day 1.
 """
 from __future__ import annotations
 import json
@@ -32,7 +32,7 @@ st.markdown(
 )
 st.markdown(
     "<div style='color:#5a6a80; font-size:14px; margin-bottom:14px;'>"
-    "Same stock bought. Same shops. Same demand. The only difference is "
+    "Same stock bought. Same stores. Same demand. The only difference is "
     "<b>where the stock starts</b> on day 1.</div>",
     unsafe_allow_html=True,
 )
@@ -56,10 +56,10 @@ with c2:
     )
 with c3:
     big_share_pct = st.slider(
-        "Big shop share of demand (%)",
+        "High-selling store share of demand (%)",
         min_value=50, max_value=95, value=75, step=5,
-        help="How uneven the two shops are. 50% = identical shops. "
-             "95% = the small shop barely sells.",
+        help="How uneven the two stores are. 50% = identical stores. "
+             "95% = the low-selling store barely sells.",
     )
 with c4:
     actual_per_week = st.slider(
@@ -72,7 +72,7 @@ with c4:
 hold_pct = st.slider(
     "**% kept in the warehouse on day 1** \U0001F441 (the lever)",
     min_value=0, max_value=100, value=30, step=5,
-    help="0% = all stock dumped to shops on day 1. "
+    help="0% = all stock dumped to stores on day 1. "
          "100% = everything kept central. The truth is somewhere in between.",
 )
 
@@ -89,7 +89,7 @@ st.caption(
     f"Forecast season total = **{forecast:,}** units · "
     f"You buy **{bought:,} units** at €{VAR_COST:.0f} each = "
     f"€{bought * VAR_COST:,.0f} of stock. "
-    f"Big shop sells **{big_rate}/wk**, Small shop sells **{small_rate}/wk** "
+    f"High-selling store sells **{big_rate}/wk**, Low-selling store sells **{small_rate}/wk** "
     f"(actual season total = **{actual_total:,}**)."
 )
 
@@ -145,7 +145,7 @@ delta_label = "earned" if delta >= 0 else "LOST"
 
 st.markdown(
     f"<div style='display:flex; gap:14px; margin:14px 0 6px;'>"
-    f"{_pnl_card('Dump everything to shops', dump_tot, '#c0392b')}"
+    f"{_pnl_card('Dump everything to stores', dump_tot, '#c0392b')}"
     f"{_pnl_card(f'Keep {hold_pct}% central', hold_tot, '#1a8a4a')}"
     f"</div>",
     unsafe_allow_html=True,
@@ -220,7 +220,7 @@ HTML = """
   .panel.hold h2 { color: #1a8a4a; }
   .panel .sub { color:#5a6a80; font-size: 11.5px; margin-bottom: 10px; }
 
-  /* Vertical topology: warehouse on top, two shops below */
+  /* Vertical topology: warehouse on top, two stores below */
   .topo {
     position: relative;
     width: 100%;
@@ -294,7 +294,7 @@ HTML = """
     pointer-events: none;
   }
 
-  /* Flying packages: yellow chips that travel from warehouse to a shop */
+  /* Flying packages: yellow chips that travel from warehouse to a store */
   .pkg {
     position: absolute;
     z-index: 5;
@@ -354,8 +354,8 @@ HTML = """
 <div class="grid">
 
 <div class="panel dump">
-  <h2>Dump everything to shops</h2>
-  <div class="sub">All bought stock split 50/50 between shops on day 1. Warehouse empty.</div>
+  <h2>Dump everything to stores</h2>
+  <div class="sub">All bought stock split 50/50 between stores on day 1. Warehouse empty.</div>
   <div class="topo" id="dump-topo">
     <svg class="flow-svg" preserveAspectRatio="none" viewBox="0 0 100 100">
       <line x1="50" y1="18" x2="17" y2="85"></line>
@@ -370,7 +370,7 @@ HTML = """
       <div class="tank-val"><span id="dump-wh-val">0</span></div>
     </div>
     <div class="node big-node">
-      <div class="tank-label">Big shop (__BIG__/wk)</div>
+      <div class="tank-label">High-selling store (__BIG__/wk)</div>
       <div id="dump-big-stack" class="tank-stack">
         <div id="dump-big-fill" class="tank-fill"></div>
         <div id="dump-big-cap" class="cap" style="display:none;"></div>
@@ -379,7 +379,7 @@ HTML = """
       <div class="tank-val"><span id="dump-big-val">0</span></div>
     </div>
     <div class="node small-node">
-      <div class="tank-label">Small shop (__SMALL__/wk)</div>
+      <div class="tank-label">Low-selling store (__SMALL__/wk)</div>
       <div id="dump-small-stack" class="tank-stack">
         <div id="dump-small-fill" class="tank-fill"></div>
         <div id="dump-small-cap" class="cap" style="display:none;"></div>
@@ -404,7 +404,7 @@ HTML = """
 
 <div class="panel hold">
   <h2>Keep <span id="hold-pct-readout">30</span>% central</h2>
-  <div class="sub">Some stock stays at the warehouse; refills shops each week as they sell.</div>
+  <div class="sub">Some stock stays at the warehouse; refills stores each week as they sell.</div>
   <div class="topo" id="hold-topo">
     <svg class="flow-svg" preserveAspectRatio="none" viewBox="0 0 100 100">
       <line x1="50" y1="18" x2="17" y2="85"></line>
@@ -419,7 +419,7 @@ HTML = """
       <div class="tank-val"><span id="hold-wh-val">0</span></div>
     </div>
     <div class="node big-node">
-      <div class="tank-label">Big shop (__BIG__/wk)</div>
+      <div class="tank-label">High-selling store (__BIG__/wk)</div>
       <div id="hold-big-stack" class="tank-stack">
         <div id="hold-big-fill" class="tank-fill"></div>
         <div id="hold-big-cap" class="cap" style="display:none;"></div>
@@ -428,7 +428,7 @@ HTML = """
       <div class="tank-val"><span id="hold-big-val">0</span></div>
     </div>
     <div class="node small-node">
-      <div class="tank-label">Small shop (__SMALL__/wk)</div>
+      <div class="tank-label">Low-selling store (__SMALL__/wk)</div>
       <div id="hold-small-stack" class="tank-stack">
         <div id="hold-small-fill" class="tank-fill"></div>
         <div id="hold-small-cap" class="cap" style="display:none;"></div>
