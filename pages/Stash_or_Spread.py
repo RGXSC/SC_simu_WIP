@@ -4,13 +4,10 @@ One lesson: dumping all your stock into shops on day 1 leaves it stuck
 in the small shop and missing in the big one. Keep some central and
 the warehouse feeds whoever is actually selling.
 
-UI: two side-by-side animated panels (one per policy), three input
-controls (forecast, stock%, hold%), and a mini P&L for each side plus
-the delta as the headline.
-
-The animation is rendered as a single SVG-based HTML component to keep
-movement smooth and let us pack the whole teaching slide into one
-deterministic frame.
+UI: two side-by-side animated panels (one per policy). Warehouse sits on
+top, the two shops below; weekly shipments appear as little flying
+packages between them. Inputs: forecast/wk, buy %, big-shop share %,
+actual demand/wk, and the headline lever — % kept central on day 1.
 """
 from __future__ import annotations
 import json
@@ -18,11 +15,6 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from sim_stash import simulate, totals, PRICE, VAR_COST, WEEKS
-
-# Big / Small split is fixed; only the absolute demand level moves with
-# the slider. 75/25 keeps the lesson crisp at any volume.
-BIG_SHARE   = 0.75
-SMALL_SHARE = 0.25
 
 st.set_page_config(layout="wide", page_title="Where should the stock sit?",
                    page_icon="\U0001F4E6")
@@ -47,44 +39,56 @@ st.markdown(
 )
 
 # ── Inputs ────────────────────────────────────────────────────────────────
-c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
+c1, c2, c3, c4 = st.columns(4)
 with c1:
-    forecast = st.number_input(
-        "Forecast (units / 26 wks)",
-        min_value=1000, max_value=10000, value=2600, step=100,
-        help="What you THINK sales will be — used to decide how much stock to buy.",
+    forecast_per_week = st.number_input(
+        "Forecast (units / week)",
+        min_value=20, max_value=500, value=100, step=10,
+        help="What you THINK weekly sales will be — used to decide how much "
+             "stock to buy for the 26-week season.",
     )
 with c2:
     stock_pct = st.slider(
         "Bought as % of forecast",
-        min_value=50, max_value=120, value=80, step=5,
-        help="How much stock you actually buy. 100% = buy exactly the forecast.",
+        min_value=50, max_value=200, value=80, step=5,
+        help="How much stock you actually buy. 100% = buy exactly the forecast. "
+             "Go up to 200% to overstock on purpose.",
     )
 with c3:
+    big_share_pct = st.slider(
+        "Big shop share of demand (%)",
+        min_value=50, max_value=95, value=75, step=5,
+        help="How uneven the two shops are. 50% = identical shops. "
+             "95% = the small shop barely sells.",
+    )
+with c4:
     actual_per_week = st.slider(
         "Actual demand (units / wk)",
         min_value=20, max_value=400, value=100, step=10,
         help="What ACTUALLY happens — flat each week. Try setting it above or "
              "below the forecast to see what under/over-buying looks like.",
     )
-with c4:
-    hold_pct = st.slider(
-        "**% kept in the warehouse on day 1** \U0001F441",
-        min_value=0, max_value=100, value=30, step=5,
-        help="The lever. 0% = all stock dumped to shops on day 1. "
-             "100% = everything kept central. The truth is in between.",
-    )
 
-bought     = int(round(forecast * stock_pct / 100))
-big_rate   = int(round(actual_per_week * BIG_SHARE))
-small_rate = int(round(actual_per_week - big_rate))  # mass-conservative
+hold_pct = st.slider(
+    "**% kept in the warehouse on day 1** \U0001F441 (the lever)",
+    min_value=0, max_value=100, value=30, step=5,
+    help="0% = all stock dumped to shops on day 1. "
+         "100% = everything kept central. The truth is somewhere in between.",
+)
+
+big_share   = big_share_pct / 100.0
+forecast    = forecast_per_week * WEEKS
+bought      = int(round(forecast * stock_pct / 100))
+big_rate    = int(round(actual_per_week * big_share))
+small_rate  = int(round(actual_per_week - big_rate))  # mass-conservative
 actual_total = actual_per_week * WEEKS
 
 st.caption(
+    f"Forecast season total = **{forecast:,}** units · "
     f"You buy **{bought:,} units** at €{VAR_COST:.0f} each = "
     f"€{bought * VAR_COST:,.0f} of stock. "
     f"Big shop sells **{big_rate}/wk**, Small shop sells **{small_rate}/wk** "
-    f"(actual demand over 26 wks = **{actual_total:,}**)."
+    f"(actual season total = **{actual_total:,}**)."
 )
 
 # ── Run the two policies ──────────────────────────────────────────────────
@@ -171,32 +175,68 @@ HTML = """
   .panel.dump h2 { color: #c0392b; }
   .panel.hold h2 { color: #1a8a4a; }
   .panel .sub { color:#5a6a80; font-size: 11.5px; margin-bottom: 10px; }
-  .chain { display: flex; gap: 14px; align-items: flex-end; min-height: 220px; }
-  .tank-wrap { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; }
-  .tank-label { font-size: 11px; color: #5a6a80; font-weight: 600;
-                text-transform: uppercase; letter-spacing: .4px; }
-  .tank-stack { position: relative; width: 80%; height: 200px;
-                background: #f3f6fa; border: 1px solid #d8e0e8;
-                border-radius: 4px; overflow: hidden; }
-  .tank-stack.wide { width: 95%; }
+
+  /* Vertical topology: warehouse on top, two shops below */
+  .topo {
+    position: relative;
+    width: 100%;
+    height: 340px;
+  }
+  .flow-svg {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+    z-index: 1;
+  }
+  .flow-svg line {
+    stroke: #c5d2e0;
+    stroke-width: 2;
+    stroke-dasharray: 4 4;
+  }
+  .node {
+    position: absolute;
+    z-index: 2;
+    display: flex; flex-direction: column;
+    align-items: center; gap: 4px;
+    width: 26%;
+  }
+  .wh-node {
+    left: 50%;
+    top: 0;
+    transform: translateX(-50%);
+  }
+  .big-node {
+    left: 4%;
+    bottom: 0;
+  }
+  .small-node {
+    right: 4%;
+    bottom: 0;
+  }
+  .tank-label {
+    font-size: 11px; color: #5a6a80; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .4px;
+    text-align: center;
+  }
+  .tank-stack {
+    position: relative;
+    width: 100%;
+    height: 130px;
+    background: #f3f6fa;
+    border: 1px solid #d8e0e8;
+    border-radius: 4px;
+    overflow: hidden;
+  }
   .tank-fill {
     position: absolute; bottom: 0; left: 0; right: 0;
     background: linear-gradient(180deg, #5fa3d8 0%, #3a7fb8 100%);
-    transition: height .12s linear;
+    transition: height .18s linear;
   }
   .tank-fill.empty { background: #e6ecf2; }
-  .tank-stack.delivering::after {
-    content: ''; position: absolute; left: 50%; top: -14px;
-    width: 14px; height: 14px; background: #f1c40f;
-    border-radius: 2px; transform: translateX(-50%);
-    box-shadow: 0 2px 4px rgba(0,0,0,.15);
-    animation: drop .5s ease-in;
-  }
-  @keyframes drop { from { top: -40px; opacity: 0; } to { top: -14px; opacity: 1; } }
   .tank-val { font-size: 14px; font-weight: 700; color: #1a2a40; }
   .tank-val.lost { color: #c0392b; }
   .ghost {
-    position: absolute; top: -38px; left: 50%; transform: translateX(-50%);
+    position: absolute; top: -22px; left: 50%; transform: translateX(-50%);
     background: #fee5e2; color: #c0392b; border: 1px solid #f5a89e;
     padding: 2px 6px; border-radius: 3px; font-size: 10.5px;
     font-weight: 700; letter-spacing: .3px; white-space: nowrap;
@@ -209,6 +249,38 @@ HTML = """
       rgba(45,108,170,.6) 0 6px, rgba(45,108,170,.85) 6px 12px);
     pointer-events: none;
   }
+
+  /* Flying packages: yellow chips that travel from warehouse to a shop */
+  .pkg {
+    position: absolute;
+    z-index: 5;
+    background: #f1c40f;
+    color: #1a2a40;
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    box-shadow: 0 2px 6px rgba(0,0,0,.18);
+    transform: translate(-50%, -50%);
+    opacity: 0;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+  @keyframes fly-big {
+    0%   { left: 50%; top: 18%;  opacity: 0; }
+    12%  { opacity: 1; }
+    88%  { opacity: 1; }
+    100% { left: 17%; top: 85%; opacity: 0; }
+  }
+  @keyframes fly-small {
+    0%   { left: 50%; top: 18%;  opacity: 0; }
+    12%  { opacity: 1; }
+    88%  { opacity: 1; }
+    100% { left: 83%; top: 85%; opacity: 0; }
+  }
+  .pkg.flying.pkg-big   { animation: fly-big   1.6s ease-in-out forwards; }
+  .pkg.flying.pkg-small { animation: fly-small 1.6s ease-in-out forwards; }
+
   .controls { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
   .play { padding: 6px 14px; border-radius: 6px; border: 0;
           background: #1a2a40; color:#fff; font-weight: 600; cursor: pointer; }
@@ -238,8 +310,12 @@ HTML = """
 <div class="panel dump">
   <h2>Dump everything to shops</h2>
   <div class="sub">All bought stock split 50/50 between shops on day 1. Warehouse empty.</div>
-  <div class="chain">
-    <div class="tank-wrap">
+  <div class="topo" id="dump-topo">
+    <svg class="flow-svg" preserveAspectRatio="none" viewBox="0 0 100 100">
+      <line x1="50" y1="18" x2="17" y2="85"></line>
+      <line x1="50" y1="18" x2="83" y2="85"></line>
+    </svg>
+    <div class="node wh-node">
       <div class="tank-label">Warehouse</div>
       <div id="dump-wh-stack" class="tank-stack">
         <div id="dump-wh-fill" class="tank-fill empty"></div>
@@ -247,7 +323,7 @@ HTML = """
       </div>
       <div class="tank-val"><span id="dump-wh-val">0</span></div>
     </div>
-    <div class="tank-wrap">
+    <div class="node big-node">
       <div class="tank-label">Big shop (__BIG__/wk)</div>
       <div id="dump-big-stack" class="tank-stack">
         <div id="dump-big-fill" class="tank-fill"></div>
@@ -256,7 +332,7 @@ HTML = """
       </div>
       <div class="tank-val"><span id="dump-big-val">0</span></div>
     </div>
-    <div class="tank-wrap">
+    <div class="node small-node">
       <div class="tank-label">Small shop (__SMALL__/wk)</div>
       <div id="dump-small-stack" class="tank-stack">
         <div id="dump-small-fill" class="tank-fill"></div>
@@ -265,6 +341,8 @@ HTML = """
       </div>
       <div class="tank-val"><span id="dump-small-val">0</span></div>
     </div>
+    <div id="dump-pkg-big"   class="pkg pkg-big">+0</div>
+    <div id="dump-pkg-small" class="pkg pkg-small">+0</div>
   </div>
   <div class="summary">
     <span class="lost">LOST sales:</span> <span id="dump-lost-tot">0</span>
@@ -281,8 +359,12 @@ HTML = """
 <div class="panel hold">
   <h2>Keep <span id="hold-pct-readout">30</span>% central</h2>
   <div class="sub">Some stock stays at the warehouse; refills shops each week as they sell.</div>
-  <div class="chain">
-    <div class="tank-wrap">
+  <div class="topo" id="hold-topo">
+    <svg class="flow-svg" preserveAspectRatio="none" viewBox="0 0 100 100">
+      <line x1="50" y1="18" x2="17" y2="85"></line>
+      <line x1="50" y1="18" x2="83" y2="85"></line>
+    </svg>
+    <div class="node wh-node">
       <div class="tank-label">Warehouse</div>
       <div id="hold-wh-stack" class="tank-stack">
         <div id="hold-wh-fill" class="tank-fill"></div>
@@ -290,7 +372,7 @@ HTML = """
       </div>
       <div class="tank-val"><span id="hold-wh-val">0</span></div>
     </div>
-    <div class="tank-wrap">
+    <div class="node big-node">
       <div class="tank-label">Big shop (__BIG__/wk)</div>
       <div id="hold-big-stack" class="tank-stack">
         <div id="hold-big-fill" class="tank-fill"></div>
@@ -299,7 +381,7 @@ HTML = """
       </div>
       <div class="tank-val"><span id="hold-big-val">0</span></div>
     </div>
-    <div class="tank-wrap">
+    <div class="node small-node">
       <div class="tank-label">Small shop (__SMALL__/wk)</div>
       <div id="hold-small-stack" class="tank-stack">
         <div id="hold-small-fill" class="tank-fill"></div>
@@ -308,6 +390,8 @@ HTML = """
       </div>
       <div class="tank-val"><span id="hold-small-val">0</span></div>
     </div>
+    <div id="hold-pkg-big"   class="pkg pkg-big">+0</div>
+    <div id="hold-pkg-small" class="pkg pkg-small">+0</div>
   </div>
   <div class="summary">
     <span class="lost">LOST sales:</span> <span id="hold-lost-tot">0</span>
@@ -335,6 +419,7 @@ const PRICE = __PRICE__;
 const VC    = __VC__;
 const peak  = DATA.peak;
 const WK    = DATA.weeks;
+const MS_PER_WEEK = 2000;   // 2 sec per week, requested pacing
 
 function setFill(id, val) {
   const fill = document.getElementById(id + "-fill");
@@ -347,7 +432,7 @@ function setVal(id, val, lost) {
   el.textContent = val;
   el.classList.toggle("lost", lost > 0);
 }
-function setGhost(id, lostThisWeek, lostCum) {
+function setGhost(id, lostCum) {
   const g = document.getElementById(id + "-ghost");
   if (lostCum > 0) {
     g.textContent = "LOST " + lostCum;
@@ -356,12 +441,15 @@ function setGhost(id, lostThisWeek, lostCum) {
     g.classList.remove("show");
   }
 }
-function setDelivery(id, inFlight) {
-  const stack = document.getElementById(id + "-stack");
-  if (inFlight > 0) {
-    stack.classList.remove("delivering");
-    void stack.offsetWidth;     // restart the animation
-    stack.classList.add("delivering");
+function flyPkg(prefix, target, qty) {
+  const pkg = document.getElementById(prefix + "-pkg-" + target);
+  if (qty > 0) {
+    pkg.textContent = "+" + qty;
+    pkg.classList.remove("flying");
+    void pkg.offsetWidth;   // restart the keyframe animation
+    pkg.classList.add("flying");
+  } else {
+    pkg.classList.remove("flying");
   }
 }
 function setCap(id, base, final) {
@@ -379,7 +467,7 @@ function setCap(id, base, final) {
   }
 }
 
-function renderPanel(prefix, states, cum, week) {
+function renderPanel(prefix, states, cum, week, flyPackages) {
   const s = states[week];
   setFill(prefix + "-wh", s.wh);
   setFill(prefix + "-big", s.big);
@@ -388,14 +476,16 @@ function renderPanel(prefix, states, cum, week) {
   setVal(prefix + "-big",   s.big,   s.lostB);
   setVal(prefix + "-small", s.small, s.lostS);
 
-  setGhost(prefix + "-big",   s.lostB, cum[week].B);
-  setGhost(prefix + "-small", s.lostS, cum[week].S);
+  setGhost(prefix + "-big",   cum[week].B);
+  setGhost(prefix + "-small", cum[week].S);
 
-  setDelivery(prefix + "-big",   s.inB);
-  setDelivery(prefix + "-small", s.inS);
+  // Only fly packages when advancing through Play — not when scrubbing.
+  if (flyPackages) {
+    flyPkg(prefix, "big",   s.inB);
+    flyPkg(prefix, "small", s.inS);
+  }
 
-  // Stuck cap is visible only on the LAST frame so the audience reads it
-  // as "this is what's still sitting there at the end of the season".
+  // Stuck cap is visible only on the LAST frame.
   if (week === WK) {
     const finalState = states[WK];
     setCap(prefix + "-big",   finalState.big,   finalState.big);
@@ -408,23 +498,23 @@ function renderPanel(prefix, states, cum, week) {
   }
 }
 
-function renderAll(week) {
+function renderAll(week, flyPackages) {
   document.getElementById("weekRead").textContent = week;
   document.getElementById("scrub").value = week;
-  renderPanel("dump", DATA.dump, DATA.cumDump, week);
-  renderPanel("hold", DATA.hold, DATA.cumHold, week);
+  renderPanel("dump", DATA.dump, DATA.cumDump, week, flyPackages);
+  renderPanel("hold", DATA.hold, DATA.cumHold, week, flyPackages);
   document.getElementById("hold-pct-readout").textContent = DATA.holdPct;
 
-  // P&L numbers update only on the final frame (cleanest reveal).
-  const showPnl = (week === WK);
+  // P&L numbers
+  const showFinal = (week === WK);
   function updatePnl(prefix, states, cum) {
     const fin  = states[WK];
-    const sold = (DATA.bought) - (fin.wh + fin.big + fin.small);
-    const lost = cum[WK].B + cum[WK].S;
-    const turn = sold * PRICE;
-    const cost = DATA.bought * VC;
-    const margin = turn - cost;
-    if (showPnl) {
+    if (showFinal) {
+      const sold = (DATA.bought) - (fin.wh + fin.big + fin.small);
+      const lost = cum[WK].B + cum[WK].S;
+      const turn = sold * PRICE;
+      const cost = DATA.bought * VC;
+      const margin = turn - cost;
       document.getElementById(prefix + "-turn").textContent   = turn.toLocaleString();
       document.getElementById(prefix + "-cost").textContent   = cost.toLocaleString();
       document.getElementById(prefix + "-margin").textContent = margin.toLocaleString();
@@ -435,7 +525,7 @@ function renderAll(week) {
       document.getElementById(prefix + "-stuck").textContent =
         (fin.wh + fin.big + fin.small);
     } else {
-      // Show running cumulative sold & lost during the animation
+      // Running cumulative sold & lost during the animation
       let runSold = 0;
       for (let w = 1; w <= week; w++) {
         runSold += states[w].soldB + states[w].soldS;
@@ -460,44 +550,54 @@ function renderAll(week) {
 }
 
 // Initial state = end-of-season (so the page renders the headline view on load)
-renderAll(WK);
+renderAll(WK, false);
 
 const playBtn = document.getElementById("play");
 const scrub   = document.getElementById("scrub");
 
-scrub.addEventListener("input", e => renderAll(parseInt(e.target.value)));
-
 let playing = false;
 let raf = null;
+
+scrub.addEventListener("input", e => {
+  // Scrubbing always cancels Play (clean state) and never triggers packages.
+  if (playing) pause();
+  renderAll(parseInt(e.target.value), false);
+});
+
 function play() {
-  if (playing) { stop(); return; }
+  if (playing) { pause(); return; }
+  // Always cancel any pending frame and start fresh from week 0.
+  if (raf) { cancelAnimationFrame(raf); raf = null; }
   playing = true;
   playBtn.classList.add("playing");
   playBtn.textContent = "⏸ Pause";
-  const total_ms = 6000;
   const start = performance.now();
-  // Always start from W0 when Play is pressed
-  let startWeek = 0;
-  renderAll(0);
+  const total_ms = WK * MS_PER_WEEK;
+  let lastWeek = -1;
+  renderAll(0, false);
   function frame(now) {
     if (!playing) return;
     const t = Math.min(1, (now - start) / total_ms);
-    const w = Math.min(WK, Math.floor(startWeek + (WK - startWeek) * t));
-    renderAll(w);
+    const w = Math.min(WK, Math.floor(t * WK));
+    if (w !== lastWeek) {
+      // Pass flyPackages=true so each new week kicks off the flying chip.
+      renderAll(w, true);
+      lastWeek = w;
+    }
     if (t < 1) {
       raf = requestAnimationFrame(frame);
     } else {
-      stop();
-      renderAll(WK);
+      renderAll(WK, false);
+      pause();
     }
   }
   raf = requestAnimationFrame(frame);
 }
-function stop() {
+function pause() {
   playing = false;
   playBtn.classList.remove("playing");
   playBtn.textContent = "▶ Play";
-  if (raf) cancelAnimationFrame(raf);
+  if (raf) { cancelAnimationFrame(raf); raf = null; }
 }
 playBtn.addEventListener("click", play);
 </script>
@@ -512,13 +612,13 @@ html = (HTML
         .replace("__BIG__",     str(big_rate))
         .replace("__SMALL__",   str(small_rate)))
 
-components.html(html, height=600, scrolling=False)
+components.html(html, height=720, scrolling=False)
 
 # ── Footer hint ─────────────────────────────────────────────────────────
 st.markdown(
     "<div style='color:#7a8a9e; font-size:11.5px; text-align:center; margin-top:8px;'>"
-    "Press <b>▶ Play</b> to watch the season unfold. Use the slider above "
-    "to change how much stock stays central — both panels re-animate."
+    "Press <b>▶ Play</b> to watch the season unfold (2 sec / week). Use the sliders above "
+    "to change the inputs — both panels re-animate."
     "</div>",
     unsafe_allow_html=True,
 )

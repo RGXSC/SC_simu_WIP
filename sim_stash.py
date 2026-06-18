@@ -13,10 +13,8 @@ allocation, before any sales have happened.
 from __future__ import annotations
 from dataclasses import dataclass
 
-# Fixed parameters for the teaching demo. Demand levels are passed into
-# simulate() so the page can drive them from sliders; the Big/Small ratio
-# stays at 75/25 so the lesson "the big shop starves, the small shop
-# overflows" reads cleanly regardless of the absolute demand level.
+# Fixed parameters for the teaching demo. Demand levels AND the Big/Small
+# split are passed into simulate() so the page can drive them from sliders.
 WEEKS              = 26
 WAREHOUSE_LT       = 1    # weeks
 COVER_TARGET_WEEKS = 2    # warehouse refills shops up to 2 wks of cover
