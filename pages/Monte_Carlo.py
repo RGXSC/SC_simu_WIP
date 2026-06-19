@@ -52,6 +52,7 @@ st.markdown(
 _FAMILIES = {
     "Lognormal (fat upside tail)": "lognormal",
     "Gamma (positive, skewed)":    "gamma",
+    "Pareto (power-law, 80/20)":   "pareto",
     "Normal (symmetric, clipped)": "truncnormal",
 }
 
@@ -305,24 +306,30 @@ sales_eur  = sellt / 100.0 * bought_by_st[None, :] * price
 with np.errstate(divide="ignore", invalid="ignore"):
     margin_pct = np.where(sales_eur > 0, margin / sales_eur * 100.0, 0.0)
 
+def _best_card(label: str, value_str: str, grid: np.ndarray, accent: str) -> str:
+    """Format one 'best cell' card (label, big value, location of the maximum)."""
+    bi = np.unravel_index(grid.argmax(), grid.shape)
+    return (
+        f"<div style='flex:1; border:1px solid #e3e8ef; border-radius:8px; "
+        f"padding:10px 14px; font-size:13px; border-top:3px solid {accent};'>"
+        f"<span style='color:#5a6a80;'>{label}</span><br>"
+        f"<b style='font-size:18px; color:{accent};'>{value_str}</b> "
+        f"<span style='color:#5a6a80;'>at hold={HOLD_PCTS[bi[0]]}%, "
+        f"target ST={TARGET_STS[bi[1]]}%</span></div>"
+    )
+
 st.markdown(
-    f"<div style='display:flex; gap:14px; margin:14px 0 8px;'>"
-    f"<div style='flex:1; border:1px solid #e3e8ef; border-radius:8px; "
+    f"<div style='display:flex; gap:10px; margin:14px 0 4px;'>"
+    f"<div style='flex:0 0 170px; border:1px solid #e3e8ef; border-radius:8px; "
     f"padding:10px 14px; font-size:13px;'>"
-    f"<span style='color:#5a6a80;'>Forecast season total</span><br>"
-    f"<b style='font-size:18px;'>{forecast_total:,} units</b></div>"
-    f"<div style='flex:1; border:1px solid #e3e8ef; border-radius:8px; "
-    f"padding:10px 14px; font-size:13px;'>"
-    f"<span style='color:#5a6a80;'>Best margin in the table</span><br>"
-    f"<b style='font-size:18px; color:#1a8a4a;'>€{margin.max():,.0f}</b> "
-    f"<span style='color:#5a6a80;'>at hold={HOLD_PCTS[margin.argmax()//margin.shape[1]]}%, "
-    f"target ST={TARGET_STS[margin.argmax()%margin.shape[1]]}%</span></div>"
-    f"<div style='flex:1; border:1px solid #e3e8ef; border-radius:8px; "
-    f"padding:10px 14px; font-size:13px;'>"
-    f"<span style='color:#5a6a80;'>Monte-Carlo rolls / compute time</span><br>"
-    f"<b style='font-size:18px;'>{R_used:,}</b> "
-    f"<span style='color:#5a6a80;'>rolls, took {actual_s:.1f}s</span></div>"
-    "</div>",
+    f"<span style='color:#5a6a80;'>Forecast season</span><br>"
+    f"<b style='font-size:17px;'>{forecast_total:,} units</b><br>"
+    f"<span style='color:#5a6a80; font-size:11px;'>"
+    f"{R_used:,} MC rolls · {actual_s:.1f}s</span></div>"
+    + _best_card("Best Sales (€)",        f"€{sales_eur.max():,.0f}", sales_eur,  "#1a8a4a")
+    + _best_card("Best Margin (%)",       f"{margin_pct.max():.1f}%", margin_pct, "#1a8a4a")
+    + _best_card("Best Sell-through (%)", f"{sellt.max():.1f}%",      sellt,      "#1a8a4a")
+    + "</div>",
     unsafe_allow_html=True,
 )
 

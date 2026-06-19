@@ -94,11 +94,25 @@ def draw_mean1(rng: np.random.Generator, family: str, cv: float,
     elif family == "truncnormal":
         # symmetric noise clipped at ~0 (further clipped below).
         x = rng.normal(1.0, cv, size)
+    elif family == "pareto":
+        # Pareto Type I (power-law tail), the canonical "few stars, many duds"
+        # shape. Shape parameter alpha is mapped from cv so the slider keeps
+        # its usual meaning:  cv=0.6 -> alpha~2.2 (moderate, top 20% ~ 38%
+        # share),  cv=1.5 -> alpha~1.17 (classic 80/20). alpha floored above
+        # 1.05 to keep the mean finite.
+        alpha = max(1.05, 0.5 + 1.0 / max(cv, 0.1))
+        x_m   = (alpha - 1.0) / alpha           # raw mean = 1 before the clip
+        x = x_m * (1.0 + rng.pareto(alpha, size))
     else:
         raise ValueError(f"unknown distribution family: {family!r}")
 
+    # Single clip then re-centre so the mean stays EXACTLY 1 (so that
+    # E[total demand] = forecast no matter which family/cv was picked).
+    # Heavy tails (e.g. Pareto at high cv) make the re-centre factor > 1,
+    # which can scale the upper bound a bit above 3 -- we accept that
+    # cosmetic drift in exchange for the mean-preservation guarantee.
     np.clip(x, DRAW_LOW, DRAW_HIGH, out=x)
-    return x / x.mean()                # exact mean 1 after the clip
+    return x / x.mean()
 
 
 # ─────────────────────────── result container ──────────────────────────
