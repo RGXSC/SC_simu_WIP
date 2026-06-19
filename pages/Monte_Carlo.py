@@ -59,6 +59,31 @@ _FAMILIES = {
 HOLD_PCTS  = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 TARGET_STS = [50, 60, 70, 80, 90, 100]
 
+# Wall-time budget for the table compute (the cached _compute_table call).
+# The slider's max R is set to keep first-load compute under this number,
+# calibrated from measured timings at K=200..2000, M=20..500.
+MAX_COMPUTE_S = 30
+
+
+def _budget_max_R(K: int, M: int) -> int:
+    """Largest MC rolls per cell that fits MAX_COMPUTE_S on this assortment.
+
+    Measured timings show the per-op cost rises 2–3x once the per-cell array
+    R·K·M outgrows L3 cache (~16 MB). The coefficient below picks the cap on
+    the conservative side so even the cache-spillover regime stays in budget.
+    """
+    if K * M == 0:
+        return 50
+    R = 9_000_000 // (K * M)
+    return int(max(10, min(R, 10_000)))
+
+
+def _est_compute_s(R: int, K: int, M: int) -> float:
+    """Order-of-magnitude estimate of the table compute time. Actual can
+    drift ~2x either way due to cache effects; we display this purely so the
+    user sees a number before clicking and isn't surprised by a 20s wait."""
+    return 0.5 + 5e-8 * 66 * R * K * M
+
 
 # ─────────────────────────── inputs ───────────────────────────────────────
 c1, c2, c3, c4 = st.columns(4)
@@ -193,42 +218,68 @@ with prev2:
 @st.cache_data(show_spinner="Computing the table…")
 def _compute_table(forecast: int, n_sku: int, n_store: int, min_per_store: int,
                    d1_fam: str, d1_cv: float, d2_fam: str, d2_cv: float,
-                   price: float, var_cost: float, fixed_cost: float):
+                   price: float, var_cost: float, fixed_cost: float,
+                   runs: int):
     """Sweep HOLD_PCTS x TARGET_STS via the closed-form FLAT-rate solver.
 
     No 26-week loop -- the solver jumps straight to the W26 outcome (the
     teaching engine assumes a flat weekly rate, so transient dynamics
     fully settle and the integral has a closed form). Verified within
     < 0.5%% of the week-by-week simulator across every regime the page
-    exposes. Result: defaults compute in ~0.3 s, the K=1000 / M=500
-    extreme in ~20 s.
+    exposes.
 
-    R auto-scales on a ~3M (run, SKU, store) budget; per-run averages are
-    already over R·SKU·store ~ 50k+ samples even at the smallest setting,
-    so MC noise on the cell averages is far below the heatmap's resolution.
+    `runs` is the user-picked MC rolls per cell -- the page caps this to
+    fit MAX_COMPUTE_S of wall time, so the cached compute always returns
+    within that budget. Returns the actual elapsed wall-time alongside the
+    arrays so the page can show it (the cache stores it for free).
     """
-    R = int(np.clip(3_000_000 // max(n_sku * n_store, 1), 8, 200))
+    import time as _time
+    t0 = _time.time()
     out = simulate_grid_fast(
         forecast_per_week=forecast, n_sku=n_sku, n_store=n_store,
         hold_pcts=HOLD_PCTS, target_sts=TARGET_STS,
         min_per_store=float(min_per_store),
         dist1_family=d1_fam, dist1_cv=d1_cv,
         dist2_family=d2_fam, dist2_cv=d2_cv,
-        runs=R, price=price, var_cost=var_cost,
+        runs=runs, price=price, var_cost=var_cost,
         fixed_cost=fixed_cost, seed=0)
     return (out["margin"], out["sellthrough"], out["lost"],
-            out["bought_by_st"], out["runs"])
+            out["bought_by_st"], out["runs"], _time.time() - t0)
 
 # Fixed cost = a percentage of forecast sales value over the season — same
 # definition as on the Stash_or_Spread page so the two stay comparable.
 forecast_sales_value = forecast_per_week * WEEKS * price
 fixed_cost = float(fix_pct) / 100.0 * forecast_sales_value
 
-margin, sellt, lost, bought_by_st, R_used = _compute_table(
+# ── MC rolls slider: more rolls = lower MC noise, capped to MAX_COMPUTE_S ─
+_max_R       = _budget_max_R(int(n_sku), int(n_store))
+_default_R   = min(200, _max_R)             # snappy first load; user can crank up
+_slider_step = max(1, _max_R // 50)
+
+r1, r2 = st.columns([3, 2])
+with r1:
+    runs_R = st.slider(
+        "Monte-Carlo rolls per cell",
+        min_value=10, max_value=_max_R, value=_default_R, step=_slider_step,
+        help=f"How many random seasons to average per cell of the table. "
+             f"More = lower MC noise on the cell averages. Capped to keep the "
+             f"first-load compute under ~{MAX_COMPUTE_S}s on the current "
+             f"{n_sku:,} SKUs × {n_store} stores -- crank up if you want "
+             "tighter numbers and don't mind the wait.")
+with r2:
+    _est_s = _est_compute_s(runs_R, int(n_sku), int(n_store))
+    st.markdown(
+        f"<div style='padding-top:30px; color:#5a6a80; font-size:13px;'>"
+        f"Estimated compute: <b style='color:#1a2a40;'>~{_est_s:.1f}s</b> "
+        f"(cached afterwards)</div>",
+        unsafe_allow_html=True)
+
+margin, sellt, lost, bought_by_st, R_used, actual_s = _compute_table(
     int(forecast_per_week), int(n_sku), int(n_store), int(min_per_store),
     _FAMILIES[dist1_label], float(dist1_cv),
     _FAMILIES[dist2_label], float(dist2_cv),
     float(price), float(var_cost), float(fixed_cost),
+    int(runs_R),
 )
 
 # Surface when the presentation minimum has overridden the forecast-based buy.
@@ -288,9 +339,9 @@ st.markdown(
     f"<span style='color:#5a6a80;'>at hold={_best_hold}%, target ST={_best_st}%</span></div>"
     f"<div style='flex:1; border:1px solid #e3e8ef; border-radius:8px; "
     f"padding:10px 14px; font-size:13px;'>"
-    f"<span style='color:#5a6a80;'>Monte-Carlo rolls per cell</span><br>"
-    f"<b style='font-size:18px;'>{R_used}</b> "
-    f"<span style='color:#5a6a80;'>({n_sku:,} SKUs × {n_store} stores)</span></div>"
+    f"<span style='color:#5a6a80;'>Monte-Carlo rolls / compute time</span><br>"
+    f"<b style='font-size:18px;'>{R_used:,}</b> "
+    f"<span style='color:#5a6a80;'>rolls, took {actual_s:.1f}s</span></div>"
     "</div>",
     unsafe_allow_html=True,
 )
