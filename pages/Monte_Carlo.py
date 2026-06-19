@@ -341,6 +341,7 @@ st.markdown(
     f"<span style='color:#5a6a80; font-size:11px;'>"
     f"{R_used:,} MC rolls · {actual_s:.1f}s</span></div>"
     + _best_card("Best Sales (€)",        f"€{sales_eur.max():,.0f}", sales_eur,  "#1a8a4a")
+    + _best_card("Best Margin (€)",       f"€{margin.max():,.0f}",    margin,     "#1a8a4a")
     + _best_card("Best Margin (%)",       f"{margin_pct.max():.1f}%", margin_pct, "#1a8a4a")
     + _best_card("Best Sell-through (%)", f"{sellt.max():.1f}%",      sellt,      "#1a8a4a")
     + "</div>",
