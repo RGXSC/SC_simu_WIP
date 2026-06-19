@@ -246,42 +246,64 @@ if min_per_store > 0 and forced_total > bought_by_st.min():
 
 # ─────────────────────────── headline + metric switch ─────────────────────
 forecast_total = forecast_per_week * WEEKS
-best_idx = np.unravel_index(margin.argmax(), margin.shape)
-best_hold = HOLD_PCTS[best_idx[0]]
-best_st   = TARGET_STS[best_idx[1]]
-best_marg = margin[best_idx]
+
+# The headline shows the best cell for whatever metric is selected. Defined
+# AFTER the metric radio further down would create an order problem, so we
+# stage the data here and render the headline once `metric` is known.
+
+metric = st.radio(
+    "Show",
+    ["Margin (€)", "Sales (€)", "Sell-through (%)", "Lost sales (units)"],
+    horizontal=True, key="metric",
+    help="Switch metric. **Sales** = revenue (€). **Margin** = revenue − stock "
+         "cost − fixed. They peak in DIFFERENT cells — that's the whole point.")
+
+# Sales in € = sold units × price. Sold per cell = sellthrough × bought / 100.
+# Bought varies only with the sell-through-target column.
+sales_eur = sellt / 100.0 * bought_by_st[None, :] * price
+
+# Pick the table for the headline + render based on the chosen metric.
+_metric_grid = {"Margin (€)": margin, "Sales (€)": sales_eur,
+                 "Sell-through (%)": sellt, "Lost sales (units)": lost}[metric]
+_better_is_bigger = metric != "Lost sales (units)"
+_best_idx  = np.unravel_index((_metric_grid if _better_is_bigger else -_metric_grid).argmax(),
+                                _metric_grid.shape)
+_best_hold = HOLD_PCTS[_best_idx[0]]
+_best_st   = TARGET_STS[_best_idx[1]]
+_best_val  = _metric_grid[_best_idx]
+_unit_prefix = "€" if metric in ("Margin (€)", "Sales (€)") else ""
+_unit_suffix = "%" if metric == "Sell-through (%)" else ""
+_best_str = f"{_unit_prefix}{_best_val:,.0f}{_unit_suffix}"
 
 st.markdown(
-    f"<div style='display:flex; gap:14px; margin:14px 0 4px;'>"
+    f"<div style='display:flex; gap:14px; margin:14px 0 8px;'>"
     f"<div style='flex:1; border:1px solid #e3e8ef; border-radius:8px; "
     f"padding:10px 14px; font-size:13px;'>"
     f"<span style='color:#5a6a80;'>Forecast season total</span><br>"
     f"<b style='font-size:18px;'>{forecast_total:,} units</b></div>"
     f"<div style='flex:1; border:1px solid #e3e8ef; border-radius:8px; "
     f"padding:10px 14px; font-size:13px;'>"
-    f"<span style='color:#5a6a80;'>Best cell in the table</span><br>"
-    f"<b style='font-size:18px; color:#1a8a4a;'>€{best_marg:,.0f}</b> "
-    f"<span style='color:#5a6a80;'>at hold={best_hold}%, sell-through-target={best_st}%</span></div>"
+    f"<span style='color:#5a6a80;'>Best cell for <b>{metric}</b></span><br>"
+    f"<b style='font-size:18px; color:#1a8a4a;'>{_best_str}</b> "
+    f"<span style='color:#5a6a80;'>at hold={_best_hold}%, target ST={_best_st}%</span></div>"
     f"<div style='flex:1; border:1px solid #e3e8ef; border-radius:8px; "
     f"padding:10px 14px; font-size:13px;'>"
     f"<span style='color:#5a6a80;'>Monte-Carlo rolls per cell</span><br>"
     f"<b style='font-size:18px;'>{R_used}</b> "
-    f"<span style='color:#5a6a80;'>(auto-scaled for {n_sku:,} SKUs × {n_store} stores)</span></div>"
+    f"<span style='color:#5a6a80;'>({n_sku:,} SKUs × {n_store} stores)</span></div>"
     "</div>",
     unsafe_allow_html=True,
 )
-
-metric = st.radio("Show", ["Margin (€)", "Sell-through (%)", "Lost sales (units)"],
-                  horizontal=True, key="metric")
 
 
 # ─────────────────────────── render the table ─────────────────────────────
 # Heatmap via altair (no matplotlib needed). Green = better; for lost-sales,
 # lower is better, so we reverse the colour scale.
 data_for, text_fmt, prefix, suffix, reverse_color = {
-    "Margin (€)":         (margin, ",.0f", "€",  "",  False),
-    "Sell-through (%)":   (sellt,  ".1f",  "",   "%", False),
-    "Lost sales (units)": (lost,   ",.0f", "",   "",  True),
+    "Margin (€)":         (margin,    ",.0f", "€",  "",  False),
+    "Sales (€)":          (sales_eur, ",.0f", "€",  "",  False),
+    "Sell-through (%)":   (sellt,     ".1f",  "",   "%", False),
+    "Lost sales (units)": (lost,      ",.0f", "",   "",  True),
 }[metric]
 
 row_labels = [f"{h}% (DUMP)" if h == 0 else f"{h}%" for h in HOLD_PCTS]
@@ -323,11 +345,17 @@ st.altair_chart(
 )
 
 st.caption(
-    f"Each cell = average across {R_used} rolled seasons. Rows = % of the buy "
-    "kept at the warehouse on day 1; columns = target sell-through that fixes "
-    "how much you bought. The greenest column tends to be the leftmost (low "
-    "target = big over-buy = lots of stock = lots of margin even with waste); "
-    "the greenest **row in any column** is the lever value of keeping stock "
-    "central. Set both CVs to 0 and the colour gradient down each column "
-    "collapses — with nothing unpredictable, where stock starts doesn't matter."
+    f"Each cell averages {R_used} rolled seasons. Rows = % kept central on "
+    "day 1; columns = target sell-through that fixes how much you bought "
+    "(buy quantity in the header). "
+    "**Why margin peaks bottom-right while sales peak top/bottom-left:** "
+    "the noise distributions have mean 1, so across many SKUs the *aggregate* "
+    "realised demand is close to the forecast. Buying more (lower target ST) "
+    "lets you sell more units in absolute terms — so **Sales (€)** is greenest "
+    "at the leftmost column. But each extra unit you buy and don't sell costs "
+    f"€{var_cost:.0f} in stock that earns nothing — so **Margin (€)** is "
+    "greenest where you bought *just* enough (ST=100%) AND kept stock central "
+    "so the warehouse could feed whichever SKUs/stores happened to win. "
+    "Push both CVs to 0 and the within-column gradient collapses: with no "
+    "uncertainty, where stock starts doesn't matter."
 )
