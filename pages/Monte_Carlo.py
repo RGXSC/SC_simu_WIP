@@ -91,30 +91,35 @@ c1, c2, c3, c4 = st.columns(4)
 with c1:
     forecast_per_week = st.slider(
         "Forecast (units / week, whole assortment)",
-        min_value=1000, max_value=10000, value=5000, step=500,
+        min_value=1000, max_value=10000, value=10000, step=500,
         help="Total weekly sales you THINK you'll do across every SKU and store. "
              "Drives how much you buy for the season.")
 with c2:
     n_sku = st.slider("Number of SKUs", min_value=50, max_value=1000,
-                      value=200, step=50,
+                      value=400, step=50,
                       help="How many distinct products share the buy. "
                            "You can't know up front which will be the winners.")
+    _per_sku = int(round(forecast_per_week * WEEKS / max(n_sku, 1)))
+    st.markdown(
+        f"<div style='color:#9aa6b8; font-size:12px; margin-top:-6px;'>"
+        f"≈ <b>{_per_sku:,}</b> units / SKU over the {WEEKS}-week season</div>",
+        unsafe_allow_html=True)
 with c3:
     n_store = st.slider("Number of stores", min_value=2, max_value=500,
-                        value=20, step=1,
+                        value=300, step=1,
                         help="How many stores share the assortment. Big store "
                              "counts make presentation minimums expensive (see below).")
 with c4:
     price    = st.number_input("Selling price (€ / unit)",
-                               min_value=10, max_value=10000, value=10, step=10)
+                               min_value=10, max_value=10000, value=100, step=10)
     var_cost = st.number_input("Cost of goods (€ / unit)",
-                               min_value=1, max_value=5000, value=5, step=1)
+                               min_value=1, max_value=5000, value=30, step=1)
 
 f1, f2 = st.columns(2)
 with f1:
     fix_pct = st.slider(
         "Fixed cost  (% of forecast sales value)",
-        min_value=0, max_value=70, value=20, step=5,
+        min_value=0, max_value=70, value=45, step=5,
         help="Overheads (rent, staff, …) as a percentage of forecast sales "
              "value (forecast units × price × 26 weeks). Same across every "
              "cell of the table — only affects the absolute margin numbers, "
@@ -148,7 +153,7 @@ with d1col:
                 unsafe_allow_html=True)
     dd1, dd2 = st.columns([3, 2])
     with dd1:
-        dist1_label = st.selectbox("Shape", list(_FAMILIES), index=0,
+        dist1_label = st.selectbox("Shape", list(_FAMILIES), index=2,
                                     key="d1_shape", label_visibility="collapsed")
     with dd2:
         dist1_cv = st.slider("CV", min_value=0.0, max_value=1.5, value=0.6,
@@ -160,7 +165,7 @@ with d2col:
                 unsafe_allow_html=True)
     dd3, dd4 = st.columns([3, 2])
     with dd3:
-        dist2_label = st.selectbox("Shape", list(_FAMILIES), index=0,
+        dist2_label = st.selectbox("Shape", list(_FAMILIES), index=2,
                                     key="d2_shape", label_visibility="collapsed")
     with dd4:
         dist2_cv = st.slider("CV", min_value=0.0, max_value=1.5, value=0.6,
@@ -254,8 +259,13 @@ forecast_sales_value = forecast_per_week * WEEKS * price
 fixed_cost = float(fix_pct) / 100.0 * forecast_sales_value
 
 # ── MC rolls slider: more rolls = lower MC noise, capped to MAX_COMPUTE_S ─
+# Slider max fits MAX_COMPUTE_S; default targets ~5s estimated so the very
+# first page render is snappy. User can drag higher (up to the 30s cap).
 _max_R       = _budget_max_R(int(n_sku), int(n_store))
-_default_R   = min(200, _max_R)             # snappy first load; user can crank up
+_target_load_s = 5.0
+_default_R   = int(np.clip(
+    (_target_load_s - 0.5) / (5e-8 * 66 * int(n_sku) * int(n_store)),
+    10, min(200, _max_R)))
 _slider_step = max(1, _max_R // 50)
 
 r1, r2 = st.columns([3, 2])
