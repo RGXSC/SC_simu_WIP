@@ -137,9 +137,16 @@ def _dist_samples(family: str, cv: float) -> np.ndarray:
 
 
 def _dist_chart(family: str, cv: float, accent: str = "#1a8a4a") -> alt.Chart:
-    """Histogram of 20k mean-1 draws, with the mean line dashed at x=1."""
+    """Pre-binned histogram of 20k mean-1 draws, with the mean line at x=1.
+
+    Pre-binning matters: altair's default vega-lite data transformer caps a
+    spec at 5,000 rows and raises MaxRowsError above that — which would
+    silently break the whole page render. Sending 40 (centre, count) pairs
+    instead of 20k samples both side-steps that limit and shrinks the
+    websocket payload by ~1000x.
+    """
     if cv <= 0:
-        df = pd.DataFrame({"x": [1.0], "y": [1.0]})
+        df = pd.DataFrame({"x": [1.0]})
         bar = alt.Chart(df).mark_rule(strokeWidth=5, color=accent).encode(
             x=alt.X("x:Q", title="multiplier (mean = 1)",
                     scale=alt.Scale(domain=[0, 3])))
@@ -147,12 +154,16 @@ def _dist_chart(family: str, cv: float, accent: str = "#1a8a4a") -> alt.Chart:
         samples = _dist_samples(family, cv)
         # Clip the long right tail for legibility; never clip below.
         p99 = float(np.percentile(samples, 99))
-        df = pd.DataFrame({"x": samples[samples <= p99]})
-        bar = alt.Chart(df).mark_bar(color=accent, opacity=0.75).encode(
-            x=alt.X("x:Q", bin=alt.Bin(maxbins=40),
-                    title="multiplier (mean = 1)"),
-            y=alt.Y("count():Q", axis=alt.Axis(labels=False, title=None,
-                                                ticks=False, domain=False)),
+        clipped = samples[samples <= p99]
+        counts, edges = np.histogram(clipped, bins=40)
+        centers = (edges[:-1] + edges[1:]) / 2
+        width   = float(edges[1] - edges[0])
+        df = pd.DataFrame({"x": centers, "n": counts})
+        bar = alt.Chart(df).mark_bar(color=accent, opacity=0.85,
+                                      size=max(2.0, 280.0 / 40 - 1)).encode(
+            x=alt.X("x:Q", title="multiplier (mean = 1)"),
+            y=alt.Y("n:Q", axis=alt.Axis(labels=False, title=None,
+                                          ticks=False, domain=False)),
         )
     mean_line = alt.Chart(pd.DataFrame({"x": [1.0]})).mark_rule(
         strokeDash=[3, 3], color="#1a2a40", size=2).encode(x="x:Q")
@@ -169,22 +180,15 @@ with prev2:
 
 
 # ─────────────────────────── table compute ────────────────────────────────
-@st.cache_data(show_spinner="Computing the table (one-time, then cached)…")
-def _compute_table(forecast: int, n_sku: int, n_store: int, min_per_store: int,
-                   d1_fam: str, d1_cv: float, d2_fam: str, d2_cv: float,
-                   price: float, var_cost: float):
-    """Sweep HOLD_PCTS x TARGET_STS, return (margin, sellthrough, lost, bought).
-
-    Runs auto-scale on a ~2M (run, SKU, store) budget: R=100 at the default
-    200 SKUs / 20 stores, flooring at R=6 for the 1000-SKU / 500-store extreme.
-    Even at R=6 each per-run mean averages 500k cells, so MC noise is tiny —
-    and the floor keeps peak memory (≈ R·SKU·store float32) bounded.
-    """
-    R = int(np.clip(2_000_000 // max(n_sku * n_store, 1), 6, 100))
+def _compute_cells(forecast, n_sku, n_store, min_per_store,
+                    d1_fam, d1_cv, d2_fam, d2_cv, price, var_cost, R,
+                    on_progress=None):
+    """Uncached inner loop — yields per-cell so callers can render progress."""
     margin = np.zeros((len(HOLD_PCTS), len(TARGET_STS)))
     sellt  = np.zeros_like(margin)
     lost   = np.zeros_like(margin)
     bought_by_st = np.zeros(len(TARGET_STS), dtype=int)
+    total = len(HOLD_PCTS) * len(TARGET_STS); done = 0
 
     for ti, st_pct in enumerate(TARGET_STS):
         for hi, hold in enumerate(HOLD_PCTS):
@@ -202,6 +206,39 @@ def _compute_table(forecast: int, n_sku: int, n_store: int, min_per_store: int,
             sellt[hi, ti]  = res.keep_sold.mean() / res.bought * 100.0
             lost[hi, ti]   = res.keep_lost.mean()
             bought_by_st[ti] = res.bought
+            done += 1
+            if on_progress is not None:
+                on_progress(done, total)
+    return margin, sellt, lost, bought_by_st
+
+
+@st.cache_data(show_spinner=False)
+def _compute_table(forecast: int, n_sku: int, n_store: int, min_per_store: int,
+                   d1_fam: str, d1_cv: float, d2_fam: str, d2_cv: float,
+                   price: float, var_cost: float):
+    """Sweep HOLD_PCTS x TARGET_STS, return (margin, sellthrough, lost, bought).
+
+    Runs auto-scale on a ~2M (run, SKU, store) budget: R=100 at the default
+    200 SKUs / 20 stores, flooring at R=6 for the 1000-SKU / 500-store extreme.
+    Even at R=6 each per-run mean averages 500k cells, so MC noise is tiny —
+    and the floor keeps peak memory (≈ R·SKU·store float32) bounded.
+
+    Progress is rendered via a live progress bar (cached re-renders skip the
+    whole function, so the bar only shows on the first compute per setting).
+    """
+    R = int(np.clip(2_000_000 // max(n_sku * n_store, 1), 6, 100))
+
+    bar = st.progress(0.0, text="Computing the table…")
+    def _tick(done, total):
+        bar.progress(done / total, text=f"Computing the table… {done}/{total} cells")
+
+    try:
+        margin, sellt, lost, bought_by_st = _compute_cells(
+            forecast, n_sku, n_store, min_per_store,
+            d1_fam, d1_cv, d2_fam, d2_cv, price, var_cost, R,
+            on_progress=_tick)
+    finally:
+        bar.empty()
     return margin, sellt, lost, bought_by_st, R
 
 
