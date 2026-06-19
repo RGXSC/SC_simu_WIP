@@ -106,9 +106,9 @@ with c3:
                              "counts make presentation minimums expensive (see below).")
 with c4:
     price    = st.number_input("Selling price (€ / unit)",
-                               min_value=1, max_value=200, value=10, step=1)
+                               min_value=10, max_value=10000, value=10, step=10)
     var_cost = st.number_input("Cost of goods (€ / unit)",
-                               min_value=1, max_value=200, value=5, step=1)
+                               min_value=1, max_value=5000, value=5, step=1)
 
 f1, f2 = st.columns(2)
 with f1:
