@@ -131,8 +131,11 @@ with f2:
 st.markdown(
     "<div style='font-size:13px; color:#5a6a80; margin:10px 0 2px;'>"
     "The two sources of randomness — pick a shape and how wild it is "
-    "(CV = std ÷ mean). The little chart shows the resulting multiplier "
-    "applied to the SKU's or store's average.</div>",
+    "(CV = std ÷ mean). Multipliers are clipped to <b>[0.3, 3]</b> and "
+    "re-centred so the mean stays at 1 — no SKU sells less than 30% or "
+    "more than 3× the assortment-wide mean. Lognormal and gamma both "
+    "give the classic <b>“few stars, many duds”</b> shape (mode below "
+    "1, long upper tail) — exactly the retail pattern.</div>",
     unsafe_allow_html=True,
 )
 
@@ -183,20 +186,18 @@ def _dist_chart(family: str, cv: float, accent: str = "#1a8a4a") -> alt.Chart:
     if cv <= 0:
         df = pd.DataFrame({"x": [1.0]})
         bar = alt.Chart(df).mark_rule(strokeWidth=5, color=accent).encode(
-            x=alt.X("x:Q", title="multiplier (mean = 1)",
-                    scale=alt.Scale(domain=[0, 3])))
+            x=alt.X("x:Q", title="multiplier (mean = 1, clipped to [0.3, 3])",
+                    scale=alt.Scale(domain=[0.3, 3])))
     else:
         samples = _dist_samples(family, cv)
-        # Clip the long right tail for legibility; never clip below.
-        p99 = float(np.percentile(samples, 99))
-        clipped = samples[samples <= p99]
-        counts, edges = np.histogram(clipped, bins=40)
+        counts, edges = np.histogram(samples, bins=40, range=(0.3, 3.0))
         centers = (edges[:-1] + edges[1:]) / 2
-        width   = float(edges[1] - edges[0])
         df = pd.DataFrame({"x": centers, "n": counts})
         bar = alt.Chart(df).mark_bar(color=accent, opacity=0.85,
                                       size=max(2.0, 280.0 / 40 - 1)).encode(
-            x=alt.X("x:Q", title="multiplier (mean = 1)"),
+            x=alt.X("x:Q",
+                    title="multiplier (mean = 1, clipped to [0.3, 3])",
+                    scale=alt.Scale(domain=[0.3, 3])),
             y=alt.Y("n:Q", axis=alt.Axis(labels=False, title=None,
                                           ticks=False, domain=False)),
         )
@@ -295,36 +296,14 @@ if min_per_store > 0 and forced_total > bought_by_st.min():
         icon="📦")
 
 
-# ─────────────────────────── headline + metric switch ─────────────────────
+# ─────────────────────────── derived metrics + headline ──────────────────
 forecast_total = forecast_per_week * WEEKS
-
-# The headline shows the best cell for whatever metric is selected. Defined
-# AFTER the metric radio further down would create an order problem, so we
-# stage the data here and render the headline once `metric` is known.
-
-metric = st.radio(
-    "Show",
-    ["Margin (€)", "Sales (€)", "Sell-through (%)", "Lost sales (units)"],
-    horizontal=True, key="metric",
-    help="Switch metric. **Sales** = revenue (€). **Margin** = revenue − stock "
-         "cost − fixed. They peak in DIFFERENT cells — that's the whole point.")
-
-# Sales in € = sold units × price. Sold per cell = sellthrough × bought / 100.
-# Bought varies only with the sell-through-target column.
-sales_eur = sellt / 100.0 * bought_by_st[None, :] * price
-
-# Pick the table for the headline + render based on the chosen metric.
-_metric_grid = {"Margin (€)": margin, "Sales (€)": sales_eur,
-                 "Sell-through (%)": sellt, "Lost sales (units)": lost}[metric]
-_better_is_bigger = metric != "Lost sales (units)"
-_best_idx  = np.unravel_index((_metric_grid if _better_is_bigger else -_metric_grid).argmax(),
-                                _metric_grid.shape)
-_best_hold = HOLD_PCTS[_best_idx[0]]
-_best_st   = TARGET_STS[_best_idx[1]]
-_best_val  = _metric_grid[_best_idx]
-_unit_prefix = "€" if metric in ("Margin (€)", "Sales (€)") else ""
-_unit_suffix = "%" if metric == "Sell-through (%)" else ""
-_best_str = f"{_unit_prefix}{_best_val:,.0f}{_unit_suffix}"
+# Sales (€) = sold units × price. Sold per cell = sellthrough × bought / 100.
+sales_eur  = sellt / 100.0 * bought_by_st[None, :] * price
+# Margin (%) = margin / sales × 100. Guard against zero sales (impossible here
+# in practice — every cell has positive expected sales — but cheap insurance).
+with np.errstate(divide="ignore", invalid="ignore"):
+    margin_pct = np.where(sales_eur > 0, margin / sales_eur * 100.0, 0.0)
 
 st.markdown(
     f"<div style='display:flex; gap:14px; margin:14px 0 8px;'>"
@@ -334,9 +313,10 @@ st.markdown(
     f"<b style='font-size:18px;'>{forecast_total:,} units</b></div>"
     f"<div style='flex:1; border:1px solid #e3e8ef; border-radius:8px; "
     f"padding:10px 14px; font-size:13px;'>"
-    f"<span style='color:#5a6a80;'>Best cell for <b>{metric}</b></span><br>"
-    f"<b style='font-size:18px; color:#1a8a4a;'>{_best_str}</b> "
-    f"<span style='color:#5a6a80;'>at hold={_best_hold}%, target ST={_best_st}%</span></div>"
+    f"<span style='color:#5a6a80;'>Best margin in the table</span><br>"
+    f"<b style='font-size:18px; color:#1a8a4a;'>€{margin.max():,.0f}</b> "
+    f"<span style='color:#5a6a80;'>at hold={HOLD_PCTS[margin.argmax()//margin.shape[1]]}%, "
+    f"target ST={TARGET_STS[margin.argmax()%margin.shape[1]]}%</span></div>"
     f"<div style='flex:1; border:1px solid #e3e8ef; border-radius:8px; "
     f"padding:10px 14px; font-size:13px;'>"
     f"<span style='color:#5a6a80;'>Monte-Carlo rolls / compute time</span><br>"
@@ -347,66 +327,63 @@ st.markdown(
 )
 
 
-# ─────────────────────────── render the table ─────────────────────────────
-# Heatmap via altair (no matplotlib needed). Green = better; for lost-sales,
-# lower is better, so we reverse the colour scale.
-data_for, text_fmt, prefix, suffix, reverse_color = {
-    "Margin (€)":         (margin,    ",.0f", "€",  "",  False),
-    "Sales (€)":          (sales_eur, ",.0f", "€",  "",  False),
-    "Sell-through (%)":   (sellt,     ".1f",  "",   "%", False),
-    "Lost sales (units)": (lost,      ",.0f", "",   "",  True),
-}[metric]
+# ─────────────────────────── render every table ───────────────────────────
+def _render_table(values: np.ndarray, *, title: str, text_fmt: str,
+                   reverse_color: bool):
+    """Render one altair heatmap of the (HOLD x TARGET_ST) grid."""
+    row_labels = [f"{h}% (DUMP)" if h == 0 else f"{h}%" for h in HOLD_PCTS]
+    col_labels = [f"{s}%\n(buy {b:,})" for s, b in zip(TARGET_STS, bought_by_st)]
+    long_rows = [{"hold": row_labels[hi], "st": col_labels[ti],
+                   "value": float(values[hi, ti])}
+                  for hi in range(len(HOLD_PCTS)) for ti in range(len(TARGET_STS))]
+    df_long = pd.DataFrame(long_rows)
 
-row_labels = [f"{h}% (DUMP)" if h == 0 else f"{h}%" for h in HOLD_PCTS]
-col_labels = [f"{s}%\n(buy {b:,})" for s, b in zip(TARGET_STS, bought_by_st)]
+    heat = alt.Chart(df_long).mark_rect(stroke="white", strokeWidth=2).encode(
+        x=alt.X("st:O", sort=col_labels, title=None,
+                axis=alt.Axis(orient="top", labelAngle=0,
+                              labelFontSize=11, labelFontWeight="bold",
+                              labelLineHeight=13)),
+        y=alt.Y("hold:O", sort=row_labels, title="% kept central on day 1",
+                axis=alt.Axis(labelFontSize=11, labelFontWeight="bold")),
+        color=alt.Color("value:Q",
+                         scale=alt.Scale(scheme="redyellowgreen",
+                                          reverse=reverse_color),
+                         legend=None),
+        tooltip=[alt.Tooltip("hold:O", title="kept central"),
+                 alt.Tooltip("st:O",   title="target sell-through"),
+                 alt.Tooltip("value:Q", format=text_fmt, title=title)],
+    )
+    labels = alt.Chart(df_long).mark_text(fontSize=11, color="#1a2a40").encode(
+        x=alt.X("st:O", sort=col_labels),
+        y=alt.Y("hold:O", sort=row_labels),
+        text=alt.Text("value:Q", format=text_fmt),
+    )
+    st.markdown(f"##### {title}")
+    st.altair_chart(
+        (heat + labels).properties(height=11 * 30 + 30),
+        use_container_width=True,
+    )
 
-long_rows = []
-for hi, hl in enumerate(row_labels):
-    for ti, cl in enumerate(col_labels):
-        long_rows.append({"hold": hl, "st": cl, "value": float(data_for[hi, ti])})
-df_long = pd.DataFrame(long_rows)
 
-heat = alt.Chart(df_long).mark_rect(stroke="white", strokeWidth=2).encode(
-    x=alt.X("st:O", sort=col_labels, title=None,
-            axis=alt.Axis(orient="top", labelAngle=0,
-                          labelFontSize=12, labelFontWeight="bold",
-                          labelLineHeight=14)),
-    y=alt.Y("hold:O", sort=row_labels, title="% kept central on day 1",
-            axis=alt.Axis(labelFontSize=12, labelFontWeight="bold")),
-    color=alt.Color("value:Q",
-                     scale=alt.Scale(scheme="redyellowgreen", reverse=reverse_color),
-                     legend=None),
-    tooltip=[alt.Tooltip("hold:O", title="kept central"),
-             alt.Tooltip("st:O",   title="target sell-through"),
-             alt.Tooltip("value:Q", format=text_fmt,
-                         title=f"{prefix}{metric}{suffix}".replace(' ()','').strip())],
-)
-labels = alt.Chart(df_long).mark_text(fontSize=12, color="#1a2a40").encode(
-    x=alt.X("st:O", sort=col_labels),
-    y=alt.Y("hold:O", sort=row_labels),
-    text=alt.Text("value:Q", format=f"{text_fmt}"),
-)
-
-st.altair_chart(
-    (heat + labels).properties(height=11 * 38 + 40,
-                                title=alt.TitleParams(
-                                    text="Target sell-through (sets how much you buy)",
-                                    fontSize=12, color="#5a6a80", anchor="middle")),
-    use_container_width=True,
-)
+# All five tables, in the order the user asked for. Reverse colour only on
+# "lost sales" (lower = better); everything else is "higher = better".
+for _title, _values, _fmt, _reverse in [
+    ("Sales (€)",          sales_eur,  ",.0f", False),
+    ("Margin (€)",         margin,     ",.0f", False),
+    ("Margin (%)",         margin_pct, ".1f",  False),
+    ("Sell-through (%)",   sellt,      ".1f",  False),
+    ("Lost sales (units)", lost,       ",.0f", True),
+]:
+    _render_table(_values, title=_title, text_fmt=_fmt, reverse_color=_reverse)
 
 st.caption(
-    f"Each cell averages {R_used} rolled seasons. Rows = % kept central on "
+    f"Every cell averages {R_used:,} rolled seasons. Rows = % kept central on "
     "day 1; columns = target sell-through that fixes how much you bought "
     "(buy quantity in the header). "
-    "**Why margin peaks bottom-right while sales peak top/bottom-left:** "
-    "the noise distributions have mean 1, so across many SKUs the *aggregate* "
-    "realised demand is close to the forecast. Buying more (lower target ST) "
-    "lets you sell more units in absolute terms — so **Sales (€)** is greenest "
-    "at the leftmost column. But each extra unit you buy and don't sell costs "
-    f"€{var_cost:.0f} in stock that earns nothing — so **Margin (€)** is "
-    "greenest where you bought *just* enough (ST=100%) AND kept stock central "
-    "so the warehouse could feed whichever SKUs/stores happened to win. "
+    "**Notice the optima don't line up:** **Sales (€)** peaks at the *leftmost* "
+    "column (buy more, sell more), while **Margin (€)** and **Margin (%)** peak "
+    f"*bottom-right* — every unit you buy and don't sell costs €{var_cost:.0f} "
+    "in stock, so over-buying erodes profit even when revenue rises. "
     "Push both CVs to 0 and the within-column gradient collapses: with no "
     "uncertainty, where stock starts doesn't matter."
 )

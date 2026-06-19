@@ -59,14 +59,25 @@ _EPS = 1e-6
 
 # ─────────────────────────── demand draws ──────────────────────────────
 
+# Realised multiplier bounds. Real SKUs/stores rarely sell less than 30% or
+# more than 3x of their assortment-wide mean; we clip every draw to this
+# window so the tails stay believable even at extreme CV. The mean is then
+# re-centred to 1 exactly so E[total demand] = forecast still holds.
+DRAW_LOW, DRAW_HIGH = 0.3, 3.0
+
+
 def draw_mean1(rng: np.random.Generator, family: str, cv: float,
                size: tuple[int, ...]) -> np.ndarray:
-    """Return positive draws with mean 1 and coefficient of variation ``cv``.
+    """Return positive draws with mean 1, clipped to [DRAW_LOW, DRAW_HIGH].
 
-    cv = std / mean. cv = 0 returns an exact array of ones (deterministic),
-    which lets the page show the no-noise baseline cleanly.
+    cv = std / mean of the *underlying* distribution before clipping; the
+    realised CV after clipping is somewhat lower at high cv. cv = 0 returns
+    an exact array of ones (deterministic), which lets the page show the
+    no-noise baseline cleanly.
 
-    family: 'lognormal' | 'gamma' | 'truncnormal' (user-selectable).
+    family: 'lognormal' | 'gamma' | 'truncnormal' (user-selectable). All
+    three are right-skewed with mode below 1 -- that's "few stars, many
+    duds", the shape that fits a real retail assortment.
     """
     if cv <= 0:
         return np.ones(size)
@@ -75,21 +86,19 @@ def draw_mean1(rng: np.random.Generator, family: str, cv: float,
         # mean-1 lognormal: sigma^2 = ln(1+cv^2), mu = -sigma^2/2
         sigma = np.sqrt(np.log(1.0 + cv * cv))
         mu    = -0.5 * sigma * sigma
-        return np.exp(rng.normal(mu, sigma, size))
-
-    if family == "gamma":
+        x = np.exp(rng.normal(mu, sigma, size))
+    elif family == "gamma":
         # mean-1 gamma: shape = 1/cv^2, scale = cv^2  (mean = shape*scale = 1)
         shape = 1.0 / (cv * cv)
-        return rng.gamma(shape, cv * cv, size)
-
-    if family == "truncnormal":
-        # symmetric noise clipped at ~0. Clipping nudges the mean up a touch
-        # at high cv; we re-centre so the realised mean stays ~1.
+        x = rng.gamma(shape, cv * cv, size)
+    elif family == "truncnormal":
+        # symmetric noise clipped at ~0 (further clipped below).
         x = rng.normal(1.0, cv, size)
-        np.clip(x, 1e-3, None, out=x)
-        return x / x.mean()
+    else:
+        raise ValueError(f"unknown distribution family: {family!r}")
 
-    raise ValueError(f"unknown distribution family: {family!r}")
+    np.clip(x, DRAW_LOW, DRAW_HIGH, out=x)
+    return x / x.mean()                # exact mean 1 after the clip
 
 
 # ─────────────────────────── result container ──────────────────────────
