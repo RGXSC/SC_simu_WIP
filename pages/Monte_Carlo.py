@@ -110,10 +110,10 @@ with c3:
                         help="How many stores share the assortment. Big store "
                              "counts make presentation minimums expensive (see below).")
 with c4:
-    price    = st.number_input("Selling price (€ / unit)",
-                               min_value=10, max_value=10000, value=100, step=10)
-    var_cost = st.number_input("Cost of goods (€ / unit)",
-                               min_value=1, max_value=5000, value=30, step=1)
+    price    = st.slider("Selling price (€ / unit)",
+                         min_value=50, max_value=5000, value=2000, step=50)
+    var_cost = st.slider("Cost of goods (€ / unit)",
+                         min_value=10, max_value=500, value=350, step=10)
 
 f1, f2 = st.columns(2)
 with f1:
@@ -132,7 +132,11 @@ with f2:
              "shelf — merchandising / assortment-breadth minimum. Seeded on day 1 "
              "and kept topped up by the warehouse. With many SKUs × many stores "
              "this floor (min × SKUs × stores) can dwarf the forecast-based buy and "
-             "force you to over-buy massively. 0 = off.")
+             "force you to over-buy massively. **The hold% rows of the table "
+             "apply only to the *free* part of the buy (= buy − forced units)** — "
+             "forced units are nailed to their store by definition, so as you "
+             "force more you need a higher hold% to keep the same absolute "
+             "central buffer. 0 = off.")
 
 st.markdown(
     "<div style='font-size:13px; color:#5a6a80; margin:10px 0 2px;'>"
