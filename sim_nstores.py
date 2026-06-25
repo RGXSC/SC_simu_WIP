@@ -405,11 +405,21 @@ def simulate_grid_fast(forecast_per_week: float,
                                     demand_eff)                               # (R,K,M)
             sold = cell_sold.sum(axis=(1, 2))                                 # (R,)
 
-            stuck = float(bought) - sold
+            # Whole-piece accounting: you can't sell 0.7 of a unit. Round each
+            # run's aggregated sold/lost to integers, then derive stuck from the
+            # integer bought so mass conservation (bought = sold + stuck) holds
+            # exactly in every run. Per-cell numbers stay fractional because
+            # they are never displayed; only the per-run totals reach the user.
+            sold  = np.rint(sold).astype(np.int64)
+            sold  = np.minimum(sold, bought)             # safety: never exceed the buy
+            stuck = bought - sold                        # integer, conservation exact
+            run_demand = np.rint(full_demand).astype(np.int64)
+            run_lost   = np.maximum(run_demand - sold, 0)
+
             margin[hi, ti] = (sold * price - (sold + stuck) * var_cost
                               - fixed_cost).mean()
             sellthrough[hi, ti] = sold.mean() / bought * 100.0
-            lost[hi, ti]        = (full_demand - sold).mean()
+            lost[hi, ti]        = run_lost.mean()
 
     return dict(margin=margin, sellthrough=sellthrough, lost=lost,
                 bought_by_st=bought_by_st, runs=R)
