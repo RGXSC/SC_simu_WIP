@@ -34,15 +34,16 @@ top_nav("pages/Lifecycle.py")
 
 st.markdown(
     "<h1 style='margin:0 0 4px 0; font-size:28px;'>\U0001F3AF "
-    "Buy depth × network size — one SKU, deterministic</h1>",
+    "Buy depth × network size — one product, step by step</h1>",
     unsafe_allow_html=True,
 )
 st.markdown(
     "<div style='color:#5a6a80; font-size:14px; margin-bottom:14px;'>"
-    "Pick a buy quantity and a network footprint for ONE product, watch it "
-    "sell down across its life. Stores are split 20% HIGH-selling / 80% "
-    "LOW-selling (the 80/20 rule, anchored on your maison size). The SKU "
-    "goes <b>top-down</b>: best stores first.</div>",
+    "Pick how many units to buy and how many stores to sell them in, then "
+    "watch one product sell down over its life. Your stores split into "
+    "20% high-selling and 80% low-selling (the 80/20 rule, measured on your "
+    "whole chain). You always place the product in your best stores "
+    "first.</div>",
     unsafe_allow_html=True,
 )
 
@@ -50,36 +51,36 @@ st.markdown(
 # ─────────────────────────── inputs ───────────────────────────────────────
 c1, c2, c3, c4 = st.columns(4)
 with c1:
-    maison_size = st.slider("Maison network (total stores)",
+    maison_size = st.slider("Stores in the whole chain",
                              min_value=10, max_value=500, value=300, step=10,
-                             help="Your chain size. 20% are HIGH-selling stores "
-                                  "that generate 80% of demand; the other 80% are "
-                                  "LOW-selling.")
+                             help="Your total store count. 20% are high-selling "
+                                  "stores that generate 80% of demand; the other "
+                                  "80% are low-selling.")
 with c2:
-    sku_network = st.slider("SKU network (stores selling THIS product)",
+    sku_network = st.slider("Stores selling this product",
                              min_value=10, max_value=int(maison_size),
                              value=min(int(maison_size * HIGH_SHARE), int(maison_size)),
                              step=5,
-                             help="How many of your stores you put this SKU in. "
-                                  "Top-down: best stores first. With maison=300, "
-                                  "the first 60 stores are HIGH-tier; past that "
-                                  "you start adding LOW-tier stores.")
+                             help="How many of your stores carry this product. "
+                                  "Best stores first: with 300 stores in the chain, "
+                                  "the first 60 are high-selling; beyond that you "
+                                  "start adding low-selling stores.")
 with c3:
-    buy = st.slider("Buy (units of this SKU)",
+    buy = st.slider("Units bought of this product",
                      min_value=10, max_value=2000, value=500, step=10,
-                     help="Total units of the SKU you order. 1 unit per "
-                          "SKU-network store sits on the shelf day 1; the rest "
-                          "sits in the warehouse for refill.")
+                     help="Total units you order. One unit per store sits on the "
+                          "shelf on day one; the rest waits in the warehouse for "
+                          "instant refill.")
 with c4:
-    price    = st.slider("Selling price (€/unit)",
+    price    = st.slider("Selling price (euros per unit)",
                           min_value=50, max_value=5000, value=2000, step=50)
-    var_cost = st.slider("Cost of goods (€/unit)",
+    var_cost = st.slider("Cost of goods (euros per unit)",
                           min_value=10, max_value=500, value=350, step=10)
 
 lifespan_months = st.slider("Lifespan (months)",
                              min_value=1.0, max_value=6.0, value=2.0, step=0.5,
-                             help="How long the SKU sells. The simulation horizon = "
-                                  "lifespan × 4.33 weeks.")
+                             help="How long the product sells. The simulation runs "
+                                  "for lifespan × 4.33 weeks.")
 
 # ── Demand profile picker with curve thumbnails ───────────────────────────
 # Matches the user's sketch: show a tiny curve of each shape next to its
@@ -111,14 +112,14 @@ def _thumb_chart(name: str, selected: bool) -> alt.Chart:
 profile = st.radio(
     "Demand profile shape", profile_keys, index=2, horizontal=True,
     label_visibility="collapsed",
-    help="Curve shape over the SKU's life: where the peak sits and how sharp.",
+    help="Curve shape over the product's life: where the peak sits and how sharp.",
 )
 for col, name in zip(profile_thumb_cols, profile_keys):
     with col:
         st.markdown(
-            f"<div style='text-align:center; font-size:12px; font-weight:600; "
-            f"color:{'#1a4a8a' if name == profile else '#5a6a80'};"
-            f"margin:0 0 -10px;'>{name}</div>",
+            f"<div style='text-align:center; font-size:12.5px; font-weight:600; "
+            f"line-height:1.5; padding-bottom:3px; "
+            f"color:{'#1a4a8a' if name == profile else '#5a6a80'};'>{name}</div>",
             unsafe_allow_html=True,
         )
         st.altair_chart(_thumb_chart(name, name == profile),
@@ -134,27 +135,27 @@ r = simulate(maison_size, sku_network, buy, lifespan_months, profile,
 # the EFFECTIVE network, but this banner explains why.
 if r["S_effective"] < r["S_chosen"]:
     st.warning(
-        f"You picked an SKU network of **{r['S_chosen']}** stores but only "
-        f"bought **{r['bought']}** units. With 1 unit per store on day 1, "
-        f"only **{r['S_effective']}** stores can actually be stocked. The "
-        "matrix below and the chart use that effective network.",
+        f"You chose **{r['S_chosen']}** stores but only bought "
+        f"**{r['bought']}** units. With one unit per store on day one, only "
+        f"**{r['S_effective']}** stores can actually be stocked. The tables "
+        "below and the charts use that smaller store count.",
         icon="⚠️")
 
 c_a, c_b, c_c, c_d, c_e = st.columns(5)
 with c_a:
-    st.metric("Bought (units)", f"{r['bought']:,}")
+    st.metric("Units bought", f"{r['bought']:,}")
 with c_b:
-    st.metric("Sold", f"{r['sold']:,.0f}",
+    st.metric("Units sold", f"{r['sold']:,.0f}",
               f"{r['sell_through_pct']:.1f}% sell-through")
 with c_c:
-    st.metric("Lost (units)", f"{r['lost']:,.0f}")
+    st.metric("Units lost", f"{r['lost']:,.0f}")
 with c_d:
-    st.metric("Margin (€)", f"€{r['margin']:,.0f}",
+    st.metric("Margin (euros)", f"€{r['margin']:,.0f}",
               f"{r['margin_pct']:.1f}% of sales")
 with c_e:
-    st.metric("Network split",
-              f"{r['S_high']}H / {r['S_low']}L",
-              f"horizon {r['horizon']} wk")
+    st.metric("Stores carrying the product",
+              f"{r['S_high']} high + {r['S_low']} low",
+              f"selling for {r['horizon']} weeks")
 
 
 # ═══════════════════════════ REVEAL 1: week-by-week ═══════════════════════
@@ -168,144 +169,140 @@ with st.expander("\U0001F4CA  Reveal 1 — What happens week by week",
                          labelFontSize=11, titleFontSize=12)
     week_scale = alt.Scale(domain=[0, H], nice=False)
 
-    # Build a long-form dataframe from the per-week states. The numeric
-    # `order` column controls the stacking sequence (LOW at bottom, then
-    # HIGH, then warehouse on top). Legend labels match the sketch:
-    # "Mid stock" = warehouse, "In store …" = on the shelf.
+    # ── Four-way decomposition of all stock on hand, week by week ──
+    # Stack order (bottom→top): high-store stock that will sell, low-store
+    # stock that will sell, warehouse stock that will serve remaining demand,
+    # then everything left over (surplus that only sells if demand beats the
+    # forecast). The four series sum to total stock on hand.
+    STOCK_SERIES = [
+        ("High-selling stores stock",            "high_committed", 0, "#1a6b3a"),
+        ("Low-selling stores stock",             "low_committed",  1, "#7fbf7b"),
+        ("Available to perform (in warehouse)",  "wh_perform",     2, "#5a7fb0"),
+        ("Available to overperform (surplus)",   "overperform",    3, "#c9d2de"),
+    ]
     rows = []
     for s in r["states"]:
-        rows.append({"week": s.week, "kind": "In store (LOW)",
-                     "stock": s.stock_low_total,  "order": 0})
-        rows.append({"week": s.week, "kind": "In store (HIGH)",
-                     "stock": s.stock_high_total, "order": 1})
-        rows.append({"week": s.week, "kind": "Mid stock (WH)",
-                     "stock": s.wh,               "order": 2})
+        for label, attr, order, _col in STOCK_SERIES:
+            rows.append({"week": s.week, "kind": label,
+                         "stock": getattr(s, attr), "order": order})
     df_stock = pd.DataFrame(rows)
+    stock_domain = [lbl for lbl, *_ in STOCK_SERIES]
+    stock_range  = [col for *_, col in STOCK_SERIES]
 
-    # Weekly demand line (HIGH + LOW = total weekly demand on the SKU)
+    # Weekly actual demand (high + low) as a line on top of the areas.
     df_demand = pd.DataFrame([
         {"week": s.week,
          "demand": (s.sold_high + s.lost_high) + (s.sold_low + s.lost_low)}
         for s in r["states"]
     ])
 
-    # Per-week sales + lost (flat dataframe for the bar chart)
+    # Per-week sales + lost, split by store tier — STACKED (one wide bar per
+    # week) so the bars are large and each week reads as total demand.
+    FLOW_SERIES = [
+        ("Sold by high-selling stores", "sold_high", 0, "#1a6b3a"),
+        ("Sold by low-selling stores",  "sold_low",  1, "#7fbf7b"),
+        ("Lost by high-selling stores", "lost_high", 2, "#c0392b"),
+        ("Lost by low-selling stores",  "lost_low",  3, "#e88c7d"),
+    ]
     rows_flow = []
     for s in r["states"][1:]:                # skip week 0 (pre-sales)
-        rows_flow.append({"week": s.week, "kind": "% sold (HIGH)",
-                          "units": s.sold_high})
-        rows_flow.append({"week": s.week, "kind": "% sold (LOW)",
-                          "units": s.sold_low})
-        rows_flow.append({"week": s.week, "kind": "Lost sales (HIGH)",
-                          "units": s.lost_high})
-        rows_flow.append({"week": s.week, "kind": "Lost sales (LOW)",
-                          "units": s.lost_low})
+        for label, attr, order, _col in FLOW_SERIES:
+            rows_flow.append({"week": s.week, "kind": label,
+                              "units": getattr(s, attr), "order": order})
     df_flow = pd.DataFrame(rows_flow)
+    flow_domain = [lbl for lbl, *_ in FLOW_SERIES]
+    flow_range  = [col for *_, col in FLOW_SERIES]
 
-    # Coverage (% stocked) per tier — "% network well" in the sketch.
+    # Coverage (% of each tier's stores still holding stock).
     rows_cov = []
     for s in r["states"]:
-        rows_cov.append({"week": s.week, "tier": "HIGH-tier",
+        rows_cov.append({"week": s.week, "tier": "High-selling stores",
                          "pct": s.pct_high_stocked * 100})
-        rows_cov.append({"week": s.week, "tier": "LOW-tier",
+        rows_cov.append({"week": s.week, "tier": "Low-selling stores",
                          "pct": s.pct_low_stocked  * 100})
     df_cov = pd.DataFrame(rows_cov)
 
-    palette = {
-        "Mid stock (WH)":     "#9aa6b8",
-        "In store (HIGH)":    "#1a8a4a",
-        "In store (LOW)":     "#7fbf7b",
-        "% sold (HIGH)":      "#1a8a4a",
-        "% sold (LOW)":       "#7fbf7b",
-        "Lost sales (HIGH)":  "#c0392b",
-        "Lost sales (LOW)":   "#e88c7d",
-    }
-    domain_stock = ["In store (LOW)", "In store (HIGH)", "Mid stock (WH)"]
-
-    # ── Chart A: stacked stock by location + actual demand as a line ──
+    # ── Chart A: stacked stock decomposition + actual demand line ──
     stock_area = (
         alt.Chart(df_stock)
-        .mark_area(opacity=0.85, interpolate="monotone")
+        .mark_area(opacity=0.9, interpolate="monotone")
         .encode(
             x=alt.X("week:Q", title="week", axis=week_axis, scale=week_scale),
             y=alt.Y("stock:Q", title="units of stock", stack="zero"),
             color=alt.Color("kind:N",
-                             scale=alt.Scale(domain=domain_stock,
-                                              range=[palette[k] for k in domain_stock]),
+                             scale=alt.Scale(domain=stock_domain, range=stock_range),
                              legend=alt.Legend(title=None, orient="top",
-                                                labelFontSize=12)),
+                                                labelFontSize=12, columns=2)),
             order=alt.Order("order:Q"),
             tooltip=[alt.Tooltip("week:Q", title="week", format="d"),
-                     alt.Tooltip("kind:N",  title="location"),
+                     alt.Tooltip("kind:N",  title="stock pool"),
                      alt.Tooltip("stock:Q", format=",.0f", title="units")],
         )
     )
     demand_line = (
         alt.Chart(df_demand)
-        .mark_line(color="#1a4a8a", strokeWidth=2.5,
-                    point=alt.OverlayMarkDef(filled=True, size=50,
-                                              color="#1a4a8a"))
+        .mark_line(color="#1a2a40", strokeWidth=2.5,
+                    point=alt.OverlayMarkDef(filled=True, size=55, color="#1a2a40"))
         .encode(
             x=alt.X("week:Q", axis=week_axis, scale=week_scale),
             y=alt.Y("demand:Q"),
             tooltip=[alt.Tooltip("week:Q", title="week", format="d"),
                      alt.Tooltip("demand:Q", format=",.0f",
-                                  title="actual demand")],
+                                  title="actual demand (units)")],
         )
     )
     stock_chart = (
         (stock_area + demand_line)
-        .properties(height=420,
+        .properties(height=440,
                     title=alt.TitleParams(
-                        text="Stock by location (areas) and actual demand (line)",
+                        text="Where the stock sits each week (areas) and "
+                             "actual weekly demand (line)",
                         fontSize=14))
     )
 
-    # ── Chart B: per-tier coverage — sketch's "% network well" ──
+    # ── Chart B: per-tier coverage ──
     cov_chart = (
         alt.Chart(df_cov)
         .mark_line(point=True, strokeWidth=3)
         .encode(
             x=alt.X("week:Q", title="week", axis=week_axis, scale=week_scale),
-            y=alt.Y("pct:Q", title="% of tier's stores still able to sell",
+            y=alt.Y("pct:Q", title="percent of the tier's stores still in stock",
                     scale=alt.Scale(domain=[0, 100])),
             color=alt.Color("tier:N",
-                             scale=alt.Scale(domain=["HIGH-tier", "LOW-tier"],
-                                              range=["#1a8a4a", "#7fbf7b"]),
+                             scale=alt.Scale(domain=["High-selling stores",
+                                                      "Low-selling stores"],
+                                              range=["#1a6b3a", "#7fbf7b"]),
                              legend=alt.Legend(title=None, orient="top",
                                                 labelFontSize=12)),
             tooltip=[alt.Tooltip("week:Q", title="week", format="d"),
-                     alt.Tooltip("tier:N", title="tier"),
-                     alt.Tooltip("pct:Q",  format=".1f", title="% stocked")],
+                     alt.Tooltip("tier:N", title="store tier"),
+                     alt.Tooltip("pct:Q",  format=".1f", title="percent in stock")],
         )
         .properties(height=320,
                     title=alt.TitleParams(
-                        text="% network well — coverage week by week",
+                        text="How much of each tier's network is still in stock",
                         fontSize=14))
     )
 
-    # ── Chart C: per-week sales & lost (split by tier) ──
-    domain_flow = ["% sold (HIGH)", "% sold (LOW)",
-                   "Lost sales (HIGH)", "Lost sales (LOW)"]
+    # ── Chart C: per-week sales & lost, STACKED (large bars) ──
     flow_chart = (
         alt.Chart(df_flow)
-        .mark_bar()
+        .mark_bar(size=26)
         .encode(
             x=alt.X("week:Q", title="week", axis=week_axis, scale=week_scale),
-            y=alt.Y("units:Q", title="units"),
+            y=alt.Y("units:Q", title="units", stack="zero"),
             color=alt.Color("kind:N",
-                             scale=alt.Scale(domain=domain_flow,
-                                              range=[palette[k] for k in domain_flow]),
+                             scale=alt.Scale(domain=flow_domain, range=flow_range),
                              legend=alt.Legend(title=None, orient="top",
-                                                labelFontSize=12)),
-            xOffset=alt.XOffset("kind:N"),
+                                                labelFontSize=12, columns=2)),
+            order=alt.Order("order:Q"),
             tooltip=[alt.Tooltip("week:Q", title="week", format="d"),
-                     alt.Tooltip("kind:N",  title="kind"),
+                     alt.Tooltip("kind:N",  title="flow"),
                      alt.Tooltip("units:Q", format=",.0f", title="units")],
         )
-        .properties(height=320,
+        .properties(height=340,
                     title=alt.TitleParams(
-                        text="Sales and lost demand each week, by tier",
+                        text="Units sold and units lost each week, by store tier",
                         fontSize=14))
     )
 
@@ -314,11 +311,16 @@ with st.expander("\U0001F4CA  Reveal 1 — What happens week by week",
     st.altair_chart(flow_chart,  use_container_width=True)
 
     st.caption(
-        f"With **maison = {maison_size}** there are "
-        f"**{r['M_high']} HIGH** and **{r['M_low']} LOW** stores. Your SKU "
-        f"network of **{sku_network}** stores top-down captures "
-        f"**{r['S_high']} HIGH** + **{r['S_low']} LOW**. The HIGH tier "
-        f"sells {HIGH_RATE_MULT:.0f}× faster per store than the LOW tier."
+        f"Your chain has **{r['M_high']} high-selling** and **{r['M_low']} "
+        f"low-selling** stores. Placing the product in your best "
+        f"**{sku_network}** stores reaches **{r['S_high']} high-selling** + "
+        f"**{r['S_low']} low-selling**. A high-selling store sells "
+        f"{HIGH_RATE_MULT:.0f} times faster than a low-selling one. "
+        "Replenishment from the warehouse is **instant** (no delay), so a "
+        "store only loses a sale when the warehouse itself has run dry — "
+        "which happens when too much stock was committed on day one to "
+        "low-selling stores that will never sell it (the grey "
+        "**available to overperform** band)."
     )
 
 
@@ -349,79 +351,78 @@ with st.expander("\U0001F4C8  Reveal 2 — Optimal (Network × Buy) matrix",
                   float(price), float(var_cost))
     nets, buys = g["sku_networks"], g["buys"]
 
-    # Build long-form dataframe combining all three metrics, with separate
-    # 'best' columns we can use to draw the highlighted markers.
-    def _grid_chart(matrix, title, fmt, scheme="redyellowgreen",
-                     reverse_color=False, highlight_color="#1a2a40"):
-        # Use the INTEGER fields for the axis encoding so altair sorts
-        # numerically (10, 30, 60, 120, 200, 300, 400, 500), not as strings
-        # (10, 120, 200, 30, 300, 400, 500, 60). Same for the column axis.
-        rows = []
-        for i, S in enumerate(nets):
-            for j, N in enumerate(buys):
-                rows.append({"S": int(S), "N": int(N),
-                             "value": float(matrix[i, j])})
-        df = pd.DataFrame(rows)
-        bi = np.unravel_index(matrix.argmax(), matrix.shape)
-        best_S, best_N = int(nets[bi[0]]), int(buys[bi[1]])
-        bv = float(matrix[bi])
+    # For each column (each buy quantity) we highlight the best network
+    # size(s) — the rows within 1% of that column's maximum. No colour
+    # gradient: cells are plain, only the per-column winners are tinted.
+    # This reads as "for THIS buy, here is the best store count to choose".
+    TOL = 0.01
 
+    def _grid_chart(matrix, title, fmt=",.0f", highlight="#1a6b3a"):
         x_sorted = sorted(set(int(b) for b in buys))
         y_sorted = sorted(set(int(s) for s in nets))
 
-        heat = (alt.Chart(df).mark_rect(stroke="white", strokeWidth=2)
-                .encode(
-                    x=alt.X("N:O", sort=x_sorted,
-                            axis=alt.Axis(orient="top", labelAngle=0,
-                                          labelFontSize=11, labelFontWeight="bold"),
-                            title="Buy (units)"),
-                    y=alt.Y("S:O", sort=y_sorted,
-                            axis=alt.Axis(labelFontSize=11, labelFontWeight="bold"),
-                            title="SKU network (stores)"),
-                    color=alt.Color("value:Q",
-                                     scale=alt.Scale(scheme=scheme,
-                                                     reverse=reverse_color),
-                                     legend=None),
-                    tooltip=[alt.Tooltip("S:Q", title="SKU network"),
-                             alt.Tooltip("N:Q", title="Buy"),
-                             alt.Tooltip("value:Q", format=fmt, title=title)]
-                ))
-        labels = (alt.Chart(df).mark_text(fontSize=10, color="#1a2a40")
-                  .encode(x=alt.X("N:O", sort=x_sorted),
-                          y=alt.Y("S:O", sort=y_sorted),
-                          text=alt.Text("value:Q", format=fmt)))
+        rows = []
+        for j, N in enumerate(buys):
+            col = matrix[:, j]
+            col_max = float(col.max())
+            thresh = col_max * (1.0 - TOL) if col_max >= 0 else col_max * (1.0 + TOL)
+            for i, S in enumerate(nets):
+                v = float(matrix[i, j])
+                rows.append({"S": int(S), "N": int(N), "value": v,
+                             "best": bool(v >= thresh)})
+        df = pd.DataFrame(rows)
 
-        # Bold outline on the best cell
-        best_df = pd.DataFrame([{"S": best_S, "N": best_N, "value": bv}])
-        marker = (alt.Chart(best_df).mark_rect(
-                    fill=None, stroke=highlight_color, strokeWidth=4)
+        # Background: best cells tinted, the rest plain white. No gradient.
+        cells = (alt.Chart(df).mark_rect(stroke="#e6e6e6", strokeWidth=1)
+                 .encode(
+                     x=alt.X("N:O", sort=x_sorted,
+                             axis=alt.Axis(orient="top", labelAngle=0,
+                                           labelFontSize=11, labelFontWeight="bold"),
+                             title="Units bought"),
+                     y=alt.Y("S:O", sort=y_sorted,
+                             axis=alt.Axis(labelFontSize=11, labelFontWeight="bold"),
+                             title="Stores carrying the product"),
+                     color=alt.Color("best:N",
+                                      scale=alt.Scale(domain=[True, False],
+                                                      range=[highlight, "#ffffff"]),
+                                      legend=None),
+                     tooltip=[alt.Tooltip("S:Q", title="Stores carrying the product"),
+                              alt.Tooltip("N:Q", title="Units bought"),
+                              alt.Tooltip("value:Q", format=fmt, title=title)]
+                 ))
+        # Best cells get a bold dark outline on top of the tint.
+        marker = (alt.Chart(df[df["best"]]).mark_rect(
+                     fill=None, stroke="#1a2a40", strokeWidth=2.5)
                   .encode(x=alt.X("N:O", sort=x_sorted),
                           y=alt.Y("S:O", sort=y_sorted)))
+        labels = (alt.Chart(df).mark_text(fontSize=10)
+                  .encode(x=alt.X("N:O", sort=x_sorted),
+                          y=alt.Y("S:O", sort=y_sorted),
+                          text=alt.Text("value:Q", format=fmt),
+                          color=alt.condition("datum.best",
+                                               alt.value("#ffffff"),
+                                               alt.value("#1a2a40"))))
 
-        return (heat + labels + marker).properties(
-            height=len(nets) * 36 + 30,
-            title=alt.TitleParams(
-                text=f"{title}  (best @ S={best_S}, N={best_N} → {format(bv, fmt)})",
-                fontSize=12, anchor="start"))
+        return (cells + marker + labels).properties(
+            height=len(nets) * 38 + 30,
+            title=alt.TitleParams(text=title, fontSize=14, anchor="start"))
 
-    st.altair_chart(
-        _grid_chart(g["sales"],     "Sales (€)",   ",.0f",
-                     highlight_color="#c0392b"),
-        use_container_width=True)
-    st.altair_chart(
-        _grid_chart(g["margin"],    "Margin (€)",  ",.0f",
-                     highlight_color="#1f5fa8"),
-        use_container_width=True)
-    st.altair_chart(
-        _grid_chart(g["margin_pct"], "Margin (%)", ".1f",
-                     highlight_color="#1a8a4a"),
-        use_container_width=True)
+    st.altair_chart(_grid_chart(g["sales"],      "Sales in euros — best store count for each buy"),
+                    use_container_width=True)
+    st.altair_chart(_grid_chart(g["margin"],     "Margin in euros — best store count for each buy"),
+                    use_container_width=True)
+    st.altair_chart(_grid_chart(g["margin_pct"], "Margin percent — best store count for each buy",
+                                 fmt=".1f"),
+                    use_container_width=True)
 
     st.caption(
-        "The three optima rarely land in the same cell. **Sales (€)** "
-        "favours buying more *and* widening the network (more places to "
-        "sell, even if the marginal store is small). **Margin (€)** likes "
-        "the largest buy that the network can still flow through. "
-        "**Margin (%)** prefers narrower / shallower — keep stock close to "
-        "the HIGH-tier stores, don't pay for stuck stock in slow stores."
+        "Each column is one buy quantity. The highlighted cell(s) are the "
+        "store count that gives the best result for that buy (everything "
+        "within 1% of the column's best is highlighted, so a near-tie shows "
+        "as more than one cell). Reading down a column tells you how wide a "
+        "network to choose once you have decided how much to buy. The three "
+        "tables disagree on purpose: **sales in euros** rewards buying more "
+        "and going wider; **margin in euros** rewards the biggest buy the "
+        "network can still flow through; **margin percent** rewards staying "
+        "narrow and shallow so you do not pay for stock that never sells."
     )

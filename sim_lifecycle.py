@@ -13,14 +13,20 @@ Models the life of ONE product:
     machinery as the rest of the app) over `lifespan_months` × 4.33 weeks.
   * Total life demand = N (mass-balance assumption fixed earlier with the
     user — buy IS the demand).
-  * Each week stores sell up to their tier rate (capped by stock). The
-    warehouse refills proportionally to demand-aware need (target = 2 weeks
-    of cover), 1-week lead time.
+  * Each week the warehouse tops the stores up to 2 weeks of cover (never
+    below this week's demand) INSTANTLY -- no lead time -- before sales,
+    serving the HIGH-selling stores first when it can't cover everyone.
+    So a store never loses a sale while the warehouse still holds stock;
+    lost sales come only from MISPLACEMENT -- stock committed on day 1 to
+    low-selling stores that will never sell it strands units the high
+    sellers needed.
   * No randomness — same inputs always give the same outcome.
 
 Outputs:
-  * Per-week state for the page's Reveal 1 chart (stock split into WH /
-    HIGH-tier total / LOW-tier total; per-tier sales, lost sales, % stocked).
+  * Per-week state for the page's charts: stock split four ways
+    (high-store / low-store stock that will sell, warehouse stock that will
+    serve remaining demand, and all surplus = "available to overperform");
+    per-tier sales, lost sales, % stocked.
   * Aggregate season metrics (sold, lost, stuck, margin, sell-through).
 
 The optimisation matrix on Reveal 2 simply re-runs simulate() for each
@@ -40,8 +46,8 @@ HIGH_SHARE       = 0.20       # 20% of maison stores are HIGH-tier
 HIGH_RATE_MULT   = 16.0       # HIGH-vs-LOW per-store demand ratio
                               # (with shares 20/80 this gives 80/20 of total demand:
                               #  0.20·16 + 0.80·1 = 4.0, share of HIGH = 3.2/4.0 = 80%)
-COVER_TARGET_WEEKS = 2
-WAREHOUSE_LT     = 1
+COVER_TARGET_WEEKS = 2           # warehouse tops stores to 2 weeks of cover
+                                 # (replenishment is INSTANT — no lead time)
 WEEKS_PER_MONTH  = 52.0 / 12.0   # 4.333…
 
 # Demand-shape profiles (peak position ratio, gamma shape k). Same family
@@ -75,17 +81,30 @@ def demand_curve(horizon: int, profile: str) -> np.ndarray:
 
 @dataclass
 class WeekState:
-    """Stock + flow snapshot at the end of a week (or week 0 = pre-sales)."""
+    """Stock + flow snapshot at the end of a week (or week 0 = pre-sales).
+
+    The four ``*_committed`` / ``perform`` / ``overperform`` fields are a
+    DISJOINT decomposition of all stock on hand (they sum to
+    wh + stock_high_total + stock_low_total). They answer: of everything you
+    are holding right now, how much will actually sell at the forecast
+    ('perform') versus how much is surplus that only pays off if demand beats
+    forecast ('overperform')?
+    """
     week:              int    # 0..horizon
-    wh:                float  # warehouse stock at end of week
-    stock_high_total:  float  # sum of stock across the S_high HIGH-tier stores
-    stock_low_total:   float  # sum of stock across the S_low LOW-tier stores
-    sold_high:         float  # sales by the HIGH tier this week
-    sold_low:          float
-    lost_high:         float  # demand the HIGH tier couldn't fulfil this week
-    lost_low:          float
+    wh:                int    # warehouse stock at end of week
+    stock_high_total:  int    # sum of stock across the S_high HIGH-tier stores
+    stock_low_total:   int    # sum of stock across the S_low LOW-tier stores
+    sold_high:         int    # sales by the HIGH tier this week
+    sold_low:          int
+    lost_high:         int    # demand the HIGH tier couldn't fulfil this week
+    lost_low:          int
     pct_high_stocked:  float  # fraction of HIGH stores still able to sell (0..1)
     pct_low_stocked:   float  # same for LOW stores
+    # ── perform / overperform decomposition (sum = total stock on hand) ──
+    high_committed:    int    # HIGH-store stock that will sell at forecast
+    low_committed:     int    # LOW-store stock that will sell at forecast
+    wh_perform:        int    # warehouse stock that will serve remaining demand
+    overperform:       int    # all surplus stock (only sells if demand > forecast)
 
 
 # ───────────────────────────── the engine ─────────────────────────────────
@@ -131,27 +150,39 @@ def simulate(maison_size: int, sku_network: int, buy: int,
     cum_low_float  = np.cumsum(demand_low_week)
     cum_high_int = 0                                 # integer demand drawn so far
     cum_low_int  = 0
+    # Whole-season integer demand per tier (for the remaining-demand split).
+    total_demand_high = int(np.floor(cum_high_float[-1] + 1e-9))
+    total_demand_low  = int(np.floor(cum_low_float[-1]  + 1e-9))
 
-    # Day-1 allocation: 1 unit per SKU-network store, remainder in WH.
-    # ALL stock quantities below are integer pieces -- we don't sell halves.
+    # Day-1 allocation: 1 unit per store carrying the product, remainder in
+    # the warehouse. ALL stock quantities are integer pieces -- never halves.
     stock_high = int(S_high)
     stock_low  = int(S_low)
     wh         = int(max(0, N - S))
-    in_transit_high = 0
-    in_transit_low  = 0
 
+    def _split(sh, sl, w, rem_h, rem_l):
+        """Disjoint split of stock on hand into 'will sell at forecast'
+        (perform) vs 'surplus, only sells if demand beats forecast'
+        (overperform). Returns (high_committed, low_committed, wh_perform,
+        overperform); the four sum to sh + sl + w."""
+        hc = min(sh, max(0, rem_h))
+        lc = min(sl, max(0, rem_l))
+        unmet = max(0, rem_h - hc) + max(0, rem_l - lc)   # demand shelves miss
+        wp = min(w, unmet)                                # warehouse that ships
+        over = (sh - hc) + (sl - lc) + (w - wp)           # everything left over
+        return hc, lc, wp, over
+
+    hc, lc, wp, over = _split(stock_high, stock_low, wh,
+                              total_demand_high, total_demand_low)
     states: list[WeekState] = [
         WeekState(0, wh, stock_high, stock_low, 0, 0, 0, 0,
                   1.0 if S_high > 0 else 0.0,
-                  1.0 if S_low  > 0 else 0.0)
+                  1.0 if S_low  > 0 else 0.0,
+                  hc, lc, wp, over)
     ]
 
     for t in range(horizon):
-        # 1. arrivals from last week's order (1-week LT)
-        stock_high += in_transit_high
-        stock_low  += in_transit_low
-
-        # 2. discretise this week's demand into INTEGER pieces.
+        # 1. discretise this week's demand into INTEGER pieces.
         new_cum_h = int(np.floor(cum_high_float[t] + 1e-9))
         new_cum_l = int(np.floor(cum_low_float[t]  + 1e-9))
         d_h = new_cum_h - cum_high_int
@@ -159,7 +190,29 @@ def simulate(maison_size: int, sku_network: int, buy: int,
         cum_high_int = new_cum_h
         cum_low_int  = new_cum_l
 
-        # 3. sales -- capped by integer stock
+        # 2. INSTANT replenishment (no lead-time lag): the warehouse tops the
+        #    stores up to 2 weeks of cover -- but never below this week's
+        #    demand -- BEFORE sales, so a store never loses a sale while the
+        #    warehouse still holds stock. The smart planner serves the
+        #    HIGH-selling stores first when the warehouse can't cover both.
+        rate_h = demand_high_week[t] / S_high if S_high > 0 else 0.0
+        rate_l = demand_low_week[t]  / S_low  if S_low  > 0 else 0.0
+        target_h = max(d_h, int(round(COVER_TARGET_WEEKS * rate_h * S_high)))
+        target_l = max(d_l, int(round(COVER_TARGET_WEEKS * rate_l * S_low)))
+        need_h = max(0, target_h - stock_high)
+        need_l = max(0, target_l - stock_low)
+        total_need = need_h + need_l
+        if total_need > 0 and wh > 0:
+            if total_need <= wh:
+                ship_h, ship_l = need_h, need_l
+            else:
+                ship_h = min(need_h, wh)        # HIGH first
+                ship_l = wh - ship_h
+            stock_high += ship_h
+            stock_low  += ship_l
+            wh -= (ship_h + ship_l)
+
+        # 3. sales -- capped by integer stock (now topped up)
         sold_h = min(stock_high, d_h)
         sold_l = min(stock_low,  d_l)
         stock_high -= sold_h
@@ -167,43 +220,18 @@ def simulate(maison_size: int, sku_network: int, buy: int,
         lost_h = d_h - sold_h
         lost_l = d_l - sold_l
 
-        # 4. refill from WH (planner smart, 2-wk target, water-fill).
-        #    Last week places no order -- it could never land in season.
-        in_transit_high = in_transit_low = 0
-        place_orders = (t < horizon - 1) and (wh > 0)
-        if place_orders:
-            # Per-store rate this week (float). Target = 2 weeks of cover,
-            # rounded to integer pieces for the order quantity.
-            rate_h = demand_high_week[t] / S_high if S_high > 0 else 0.0
-            rate_l = demand_low_week[t]  / S_low  if S_low  > 0 else 0.0
-            target_h_total = int(round(COVER_TARGET_WEEKS * rate_h * S_high))
-            target_l_total = int(round(COVER_TARGET_WEEKS * rate_l * S_low))
-            need_h = max(0, target_h_total - stock_high)
-            need_l = max(0, target_l_total - stock_low)
-            total_need = need_h + need_l
-            if total_need > 0:
-                if total_need <= wh:
-                    ship_h, ship_l = need_h, need_l
-                else:
-                    # Water-fill in integer pieces. Round HIGH first
-                    # (the bigger need), give remainder to LOW.
-                    ship_h = min(int(round(need_h * wh / total_need)), need_h, wh)
-                    ship_l = min(wh - ship_h, need_l)
-                    if ship_l < 0:
-                        ship_l = 0
-                in_transit_high = ship_h
-                in_transit_low  = ship_l
-                wh -= (ship_h + ship_l)
+        # 4. perform / overperform split against the demand STILL to come.
+        rem_h = total_demand_high - cum_high_int
+        rem_l = total_demand_low  - cum_low_int
+        hc, lc, wp, over = _split(stock_high, stock_low, wh, rem_h, rem_l)
 
         # Per-tier coverage: integer stock divided by store count, capped at 1.
-        # Equivalent to "fraction of stores still holding >=1 unit" under
-        # uniform within-tier distribution.
         pct_h = min(1.0, stock_high / S_high) if S_high > 0 else 0.0
         pct_l = min(1.0, stock_low  / S_low ) if S_low  > 0 else 0.0
 
         states.append(WeekState(t + 1, wh, stock_high, stock_low,
                                  sold_h, sold_l, lost_h, lost_l,
-                                 pct_h, pct_l))
+                                 pct_h, pct_l, hc, lc, wp, over))
 
     # ── Season totals ──
     sold  = sum(s.sold_high + s.sold_low for s in states)
@@ -237,11 +265,12 @@ def simulate(maison_size: int, sku_network: int, buy: int,
 
 
 def _empty_result(M, S, N, horizon, S_high, S_low, price, var_cost):
-    states = [WeekState(t, float(max(0, N - S)),
-                        float(S_high), float(S_low),
+    wh0 = int(max(0, N - S))
+    states = [WeekState(t, wh0, int(S_high), int(S_low),
                         0, 0, 0, 0,
                         1.0 if S_high > 0 else 0.0,
-                        1.0 if S_low  > 0 else 0.0)
+                        1.0 if S_low  > 0 else 0.0,
+                        int(S_high), int(S_low), 0, wh0)
               for t in range(horizon + 1)]
     return {
         "states":           states, "horizon": horizon,
