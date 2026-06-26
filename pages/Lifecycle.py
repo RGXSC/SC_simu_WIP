@@ -170,15 +170,17 @@ with st.expander("\U0001F4CA  Reveal 1 — What happens week by week",
     week_scale = alt.Scale(domain=[0, H], nice=False)
 
     # ── Four-way decomposition of all stock on hand, week by week ──
-    # Stack order (bottom→top): high-store stock that will sell, low-store
-    # stock that will sell, warehouse stock that will serve remaining demand,
-    # then everything left over (surplus that only sells if demand beats the
-    # forecast). The four series sum to total stock on hand.
+    # Stack order (bottom→top): stock in high-selling stores (raw), stock
+    # in low-selling stores (raw), warehouse stock committed to remaining
+    # forecast demand, warehouse buffer beyond forecast needs. The four
+    # series sum to total stock on hand. Stranded stock (units placed in
+    # low-selling stores that won't get served by demand) shows up as the
+    # low-stores band staying high while demand evaporates.
     STOCK_SERIES = [
-        ("High-selling stores stock",            "high_committed", 0, "#1a6b3a"),
-        ("Low-selling stores stock",             "low_committed",  1, "#7fbf7b"),
-        ("Available to perform (in warehouse)",  "wh_perform",     2, "#5a7fb0"),
-        ("Available to overperform (surplus)",   "overperform",    3, "#c9d2de"),
+        ("Stock in high-selling stores",         "stock_high_total", 0, "#1a6b3a"),
+        ("Stock in low-selling stores",          "stock_low_total",  1, "#7fbf7b"),
+        ("Available to perform (in warehouse)",  "wh_perform",       2, "#5a7fb0"),
+        ("Available to overperform (in warehouse)", "wh_overperform", 3, "#c9d2de"),
     ]
     rows = []
     for s in r["states"]:
