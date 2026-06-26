@@ -176,11 +176,20 @@ with st.expander("\U0001F4CA  Reveal 1 — What happens week by week",
     # series sum to total stock on hand. Stranded stock (units placed in
     # low-selling stores that won't get served by demand) shows up as the
     # low-stores band staying high while demand evaporates.
+    # Three-bucket mental model the user laid out: every unit on hand is
+    # either (1) IN NETWORK -- on a store shelf, will sell at forecast;
+    # (2) ABOVE NETWORK but WITHIN FORECAST -- in the warehouse, will be
+    # shipped to fulfil a remaining demand unit; (3) ABOVE NETWORK AND
+    # FORECAST -- no remaining demand to match it (stranded in low-selling
+    # stores, or warehouse excess). The "in network" bucket splits by tier
+    # so the high vs low contribution stays visible.
     STOCK_SERIES = [
-        ("Stock in high-selling stores (will sell)", "high_committed", 0, "#1a6b3a"),
-        ("Stock in low-selling stores (will sell)",  "low_committed",  1, "#7fbf7b"),
-        ("Available to perform (in warehouse)",      "wh_perform",     2, "#5a7fb0"),
-        ("Available to overperform (no demand to match)", "overperform", 3, "#c9d2de"),
+        ("In network — high-selling stores",          "high_committed", 0, "#1a6b3a"),
+        ("In network — low-selling stores",           "low_committed",  1, "#7fbf7b"),
+        ("Above network, within forecast (warehouse, will ship)",
+                                                       "wh_perform",     2, "#5a7fb0"),
+        ("Above network AND forecast (no demand to match)",
+                                                       "overperform",    3, "#d97757"),
     ]
     rows = []
     for s in r["states"]:
@@ -335,16 +344,15 @@ with st.expander("\U0001F4C8  Reveal 2 — Optimal (Network × Buy) matrix",
         "sizes and buy quantities, then highlight the cell that maximises "
         "each metric.</div>", unsafe_allow_html=True)
 
-    # Grid axes: LINEAR steps, ~13 values each, so the user sees a real
-    # gradient down each column rather than 6 isolated points.
+    # Grid axes: strict linear steps -- buy every 100 up to 2000, network
+    # every 20 up to maison_size. Big enough to see the gradient clearly
+    # in every column.
     @st.cache_data(show_spinner="Sweeping the (network × buy) grid…")
     def _run_grid(maison_size, lifespan_months, profile, price, var_cost):
-        # Network ladder: 13 evenly-spaced store counts, 10 .. maison_size.
-        net_grid = sorted({int(round(v))
-                            for v in np.linspace(10, maison_size, 13)})
-        # Buy ladder: 13 evenly-spaced quantities, 50 .. 2000.
-        buy_grid = sorted({int(round(v))
-                            for v in np.linspace(50, 2000, 13)})
+        net_grid = sorted({n for n in range(20, int(maison_size) + 1, 20)})
+        if not net_grid:
+            net_grid = [int(maison_size)]
+        buy_grid = list(range(100, 2001, 100))
         return simulate_grid(maison_size, net_grid, buy_grid,
                              lifespan_months, profile, price, var_cost)
 
@@ -358,9 +366,26 @@ with st.expander("\U0001F4C8  Reveal 2 — Optimal (Network × Buy) matrix",
     # within 1% of the column max get a bold outline on top.
     TOL = 0.01
 
-    def _grid_chart(matrix, title, fmt=",.0f"):
+    def _short_money(v: float) -> str:
+        """Compact, rounded label for euro values: 1234567 -> "1.2M",
+        56700 -> "57K", 800 -> "800". One decimal only when it adds info."""
+        a = abs(v)
+        if a >= 1_000_000:
+            return f"{v/1_000_000:.1f}M"
+        if a >= 10_000:
+            return f"{v/1000:.0f}K"
+        if a >= 1_000:
+            return f"{v/1000:.1f}K"
+        return f"{v:.0f}"
+
+    def _short_pct(v: float) -> str:
+        return f"{v:.1f}%"
+
+    def _grid_chart(matrix, title, kind="money"):
         x_sorted = sorted(set(int(b) for b in buys))
         y_sorted = sorted(set(int(s) for s in nets))
+        fmt_cell = _short_pct if kind == "pct" else _short_money
+        tooltip_fmt = ".1f" if kind == "pct" else ",.0f"
 
         rows = []
         for j, N in enumerate(buys):
@@ -370,50 +395,49 @@ with st.expander("\U0001F4C8  Reveal 2 — Optimal (Network × Buy) matrix",
             span = col_max - col_min
             for i, S in enumerate(nets):
                 v = float(matrix[i, j])
-                # 0 = column-worst, 1 = column-best, for the per-column gradient
                 rel = (v - col_min) / span if span > 0 else 1.0
                 rows.append({"S": int(S), "N": int(N), "value": v,
-                             "rel": rel, "best": bool(v >= thresh)})
+                             "rel": rel,
+                             "label": fmt_cell(v),
+                             "best": bool(v >= thresh)})
         df = pd.DataFrame(rows)
 
-        # Background: per-column gradient from off-white (worst in column)
-        # to deep green (best in column). Tells you "for THIS buy, here is
-        # how each store count compares to the others".
+        # Per-column gradient: off-white (worst in column) -> deep green
+        # (best in column). Tells you "for THIS buy, here is how every
+        # store count compares to the others".
         cells = (alt.Chart(df).mark_rect(stroke="#ffffff", strokeWidth=1)
                  .encode(
                      x=alt.X("N:O", sort=x_sorted,
                              axis=alt.Axis(orient="top", labelAngle=0,
-                                           labelFontSize=10, labelFontWeight="bold"),
+                                           labelFontSize=9, labelFontWeight="bold"),
                              title="Units bought"),
                      y=alt.Y("S:O", sort=y_sorted,
                              axis=alt.Axis(labelFontSize=10, labelFontWeight="bold"),
                              title="Stores carrying the product"),
                      color=alt.Color("rel:Q",
                                       scale=alt.Scale(
-                                          range=["#f4f6f9", "#a8d4b0", "#1a6b3a"],
-                                          domain=[0.0, 0.5, 1.0]),
+                                          range=["#f6f3ee", "#f3d28b", "#d97757", "#5a8f5a", "#1a6b3a"],
+                                          domain=[0.0, 0.4, 0.6, 0.8, 1.0]),
                                       legend=None),
                      tooltip=[alt.Tooltip("S:Q", title="Stores carrying the product"),
                               alt.Tooltip("N:Q", title="Units bought"),
-                              alt.Tooltip("value:Q", format=fmt, title=title)]
+                              alt.Tooltip("value:Q", format=tooltip_fmt, title=title)]
                  ))
         # Best cells get a bold dark outline on top of the gradient.
         marker = (alt.Chart(df[df["best"]]).mark_rect(
                      fill=None, stroke="#1a2a40", strokeWidth=2.5)
                   .encode(x=alt.X("N:O", sort=x_sorted),
                           y=alt.Y("S:O", sort=y_sorted)))
-        # Label colour stays dark on light cells, switches to white on the
-        # deepest green so the number stays readable.
         labels = (alt.Chart(df).mark_text(fontSize=9)
                   .encode(x=alt.X("N:O", sort=x_sorted),
                           y=alt.Y("S:O", sort=y_sorted),
-                          text=alt.Text("value:Q", format=fmt),
-                          color=alt.condition("datum.rel > 0.65",
+                          text=alt.Text("label:N"),
+                          color=alt.condition("datum.rel > 0.75",
                                                alt.value("#ffffff"),
                                                alt.value("#1a2a40"))))
 
         return (cells + marker + labels).properties(
-            height=len(nets) * 34 + 30,
+            height=len(nets) * 30 + 30,
             title=alt.TitleParams(text=title, fontSize=14, anchor="start"))
 
     st.altair_chart(_grid_chart(g["sales"],      "Sales in euros — optimal and sub-optimal store counts per buy"),
@@ -421,7 +445,7 @@ with st.expander("\U0001F4C8  Reveal 2 — Optimal (Network × Buy) matrix",
     st.altair_chart(_grid_chart(g["margin"],     "Margin in euros — optimal and sub-optimal store counts per buy"),
                     use_container_width=True)
     st.altair_chart(_grid_chart(g["margin_pct"], "Margin percent — optimal and sub-optimal store counts per buy",
-                                 fmt=".1f"),
+                                 kind="pct"),
                     use_container_width=True)
 
     st.caption(

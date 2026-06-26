@@ -175,17 +175,29 @@ def simulate(maison_size: int, sku_network: int, buy: int,
     def _decomp(sh, sl, w, rem_h, rem_l):
         """Four-pool decomposition of stock on hand.
 
-        high_committed = what high stores will still serve
-        low_committed  = what low stores will still serve
-        wh_perform     = warehouse stock that will ship to cover the gap
-        overperform    = everything else: stock with no demand to absorb it
-                         (stranded in low-selling stores + warehouse excess)
+        Overperform is computed GLOBALLY: max(0, total stock - total
+        remaining demand). It is the only physically honest definition --
+        a unit can only be "above network and forecast" if NO remaining
+        demand anywhere can match it. So overperform starts at 0 (you
+        bought to demand), grows ONLY as lost sales accumulate (each lost
+        sale leaves a unit of stock with no demand to absorb it), and
+        cannot coexist with un-served demand on the same unit.
+
+        We physically locate that overperform amount first in the LOW-
+        selling stores (since that's where stranding happens), then the
+        warehouse, then the high stores. Whatever each pool retains after
+        the over-share is removed is its "committed / will perform" share.
         The four sum to sh + sl + w."""
-        hc = min(sh, max(0, rem_h))
-        lc = min(sl, max(0, rem_l))
-        unmet = max(0, rem_h - hc) + max(0, rem_l - lc)
-        wp = min(w, unmet)
-        over = (sh - hc) + (sl - lc) + (w - wp)
+        rem_total = max(0, rem_h) + max(0, rem_l)
+        total = sh + sl + w
+        over = max(0, total - rem_total)
+        # locate the overperform: low stores first, then warehouse, then high
+        over_low  = min(sl, over);          over_rem = over - over_low
+        over_wh   = min(w,  over_rem);      over_rem = over_rem - over_wh
+        over_high = min(sh, over_rem)
+        lc = sl - over_low
+        wp = w  - over_wh                   # warehouse share that will ship
+        hc = sh - over_high
         return hc, lc, wp, over
 
     hc, lc, wp, over = _decomp(stock_high, stock_low, wh,
