@@ -172,36 +172,41 @@ def simulate(maison_size: int, sku_network: int, buy: int,
     stock_low  = int(S_low)
     wh         = int(max(0, N - S))
 
-    def _decomp(sh, sl, w, rem_h, rem_l):
+    def _next_demand(t_now: int, window: int) -> int:
+        """Integer demand expected over the next `window` weeks (both tiers),
+        starting from week `t_now` (inclusive)."""
+        t_end = min(horizon, t_now + window)
+        if t_end <= t_now:
+            return 0
+        h = float(demand_high_week[t_now:t_end].sum())
+        l = float(demand_low_week[t_now:t_end].sum())
+        return int(round(h + l))
+
+    def _decomp(sh, sl, w, t_now):
         """Four-pool decomposition of stock on hand.
 
-        Overperform is computed GLOBALLY: max(0, total stock - total
-        remaining demand). It is the only physically honest definition --
-        a unit can only be "above network and forecast" if NO remaining
-        demand anywhere can match it. So overperform starts at 0 (you
-        bought to demand), grows ONLY as lost sales accumulate (each lost
-        sale leaves a unit of stock with no demand to absorb it), and
-        cannot coexist with un-served demand on the same unit.
+          high_committed / low_committed = raw store stocks (everything
+                                            currently on shelves; with
+                                            tier-to-tier transfers a unit
+                                            here is always "in play").
+          wh_perform     = warehouse stock that next 2 weeks of demand
+                            will need (after what stores already hold).
+          overperform    = warehouse stock BEYOND that 2-week buffer --
+                            available to serve surprise upside demand,
+                            and drains to 0 as the warehouse empties at
+                            end of life. THIS is what "above network +
+                            forecast" means: surplus held back for
+                            potential surprise, not stranded units.
+        Sum: sh + sl + w."""
+        # Demand in the next 2 weeks (so it can shrink to 0 at end of life).
+        future = _next_demand(t_now, COVER_TARGET_WEEKS)
+        already_in_stores = sh + sl
+        wh_needed = max(0, future - already_in_stores)
+        wp = min(w, wh_needed)
+        over = w - wp
+        return sh, sl, wp, over
 
-        We physically locate that overperform amount first in the LOW-
-        selling stores (since that's where stranding happens), then the
-        warehouse, then the high stores. Whatever each pool retains after
-        the over-share is removed is its "committed / will perform" share.
-        The four sum to sh + sl + w."""
-        rem_total = max(0, rem_h) + max(0, rem_l)
-        total = sh + sl + w
-        over = max(0, total - rem_total)
-        # locate the overperform: low stores first, then warehouse, then high
-        over_low  = min(sl, over);          over_rem = over - over_low
-        over_wh   = min(w,  over_rem);      over_rem = over_rem - over_wh
-        over_high = min(sh, over_rem)
-        lc = sl - over_low
-        wp = w  - over_wh                   # warehouse share that will ship
-        hc = sh - over_high
-        return hc, lc, wp, over
-
-    hc, lc, wp, over = _decomp(stock_high, stock_low, wh,
-                                total_demand_high, total_demand_low)
+    hc, lc, wp, over = _decomp(stock_high, stock_low, wh, 0)
     states: list[WeekState] = [
         WeekState(0, wh, stock_high, stock_low, 0, 0, 0, 0,
                   1.0 if S_high > 0 else 0.0,
@@ -218,29 +223,35 @@ def simulate(maison_size: int, sku_network: int, buy: int,
         cum_high_int = new_cum_h
         cum_low_int  = new_cum_l
 
-        # 2. INSTANT replenishment (no lead-time lag): the warehouse tops the
-        #    stores up to 2 weeks of cover -- but never below this week's
-        #    demand -- BEFORE sales, so a store never loses a sale while the
-        #    warehouse still holds stock. The smart planner serves the
-        #    HIGH-selling stores first when the warehouse can't cover both.
+        # 2. INSTANT replenishment with TIER-TO-TIER TRANSFER. Stores in
+        #    the high-selling tier get priority; the warehouse tops them up
+        #    to 2 weeks of cover and, if the warehouse is empty, RECALLS
+        #    stock from low-selling stores (instant transfer, no friction)
+        #    so high stores never lose a sale while any unit exists anywhere.
         rate_h = demand_high_week[t] / S_high if S_high > 0 else 0.0
         rate_l = demand_low_week[t]  / S_low  if S_low  > 0 else 0.0
         target_h = max(d_h, int(round(COVER_TARGET_WEEKS * rate_h * S_high)))
         target_l = max(d_l, int(round(COVER_TARGET_WEEKS * rate_l * S_low)))
         need_h = max(0, target_h - stock_high)
+        # First: serve high from the warehouse
+        ship_h = min(need_h, wh)
+        stock_high += ship_h
+        wh -= ship_h
+        # Still short? Recall from low-selling stores back to high tier.
+        still_need_h = need_h - ship_h
+        if still_need_h > 0 and stock_low > 0:
+            recall = min(stock_low, still_need_h)
+            stock_low  -= recall
+            stock_high += recall
+        # Then refill low stores from whatever warehouse stock remains.
         need_l = max(0, target_l - stock_low)
-        total_need = need_h + need_l
-        if total_need > 0 and wh > 0:
-            if total_need <= wh:
-                ship_h, ship_l = need_h, need_l
-            else:
-                ship_h = min(need_h, wh)        # HIGH first
-                ship_l = wh - ship_h
-            stock_high += ship_h
-            stock_low  += ship_l
-            wh -= (ship_h + ship_l)
+        ship_l = min(need_l, wh)
+        stock_low += ship_l
+        wh -= ship_l
 
-        # 3. sales -- capped by integer stock (now topped up)
+        # 3. sales -- capped by integer stock (now topped up). With the
+        #    recall above, lost sales only happen when total stock is
+        #    genuinely below total demand.
         sold_h = min(stock_high, d_h)
         sold_l = min(stock_low,  d_l)
         stock_high -= sold_h
@@ -248,10 +259,10 @@ def simulate(maison_size: int, sku_network: int, buy: int,
         lost_h = d_h - sold_h
         lost_l = d_l - sold_l
 
-        # 4. Decompose stock on hand against demand STILL to come.
-        rem_h = total_demand_high - cum_high_int
-        rem_l = total_demand_low  - cum_low_int
-        hc, lc, wp, over = _decomp(stock_high, stock_low, wh, rem_h, rem_l)
+        # 4. Decompose stock on hand. The warehouse 'available to perform'
+        #    pool is what the next 2 weeks of demand will need; everything
+        #    else in the warehouse is 'available to overperform'.
+        hc, lc, wp, over = _decomp(stock_high, stock_low, wh, t + 1)
 
         # Per-tier coverage: integer stock divided by store count, capped at 1.
         pct_h = min(1.0, stock_high / S_high) if S_high > 0 else 0.0
