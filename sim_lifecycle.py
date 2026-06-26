@@ -223,31 +223,28 @@ def simulate(maison_size: int, sku_network: int, buy: int,
         cum_high_int = new_cum_h
         cum_low_int  = new_cum_l
 
-        # 2. INSTANT replenishment with TIER-TO-TIER TRANSFER. Stores in
-        #    the high-selling tier get priority; the warehouse tops them up
-        #    to 2 weeks of cover and, if the warehouse is empty, RECALLS
-        #    stock from low-selling stores (instant transfer, no friction)
-        #    so high stores never lose a sale while any unit exists anywhere.
-        rate_h = demand_high_week[t] / S_high if S_high > 0 else 0.0
-        rate_l = demand_low_week[t]  / S_low  if S_low  > 0 else 0.0
-        target_h = max(d_h, int(round(COVER_TARGET_WEEKS * rate_h * S_high)))
-        target_l = max(d_l, int(round(COVER_TARGET_WEEKS * rate_l * S_low)))
-        need_h = max(0, target_h - stock_high)
-        # First: serve high from the warehouse
-        ship_h = min(need_h, wh)
-        stock_high += ship_h
-        wh -= ship_h
-        # Still short? Recall from low-selling stores back to high tier.
-        still_need_h = need_h - ship_h
-        if still_need_h > 0 and stock_low > 0:
-            recall = min(stock_low, still_need_h)
-            stock_low  -= recall
-            stock_high += recall
-        # Then refill low stores from whatever warehouse stock remains.
-        need_l = max(0, target_l - stock_low)
-        ship_l = min(need_l, wh)
-        stock_low += ship_l
-        wh -= ship_l
+        # 2. INSTANT replenishment (no lead-time lag): the warehouse tops
+        #    each store back up to its day-1 baseline of 1 unit per store
+        #    -- i.e. ships every store exactly what it sold last week.
+        #    High-selling stores get served first when the warehouse cannot
+        #    cover both tiers. No transfer between stores: once a unit sits
+        #    in a low-selling store it stays there. If low stores' day-1
+        #    units never move while the warehouse drains topping the high
+        #    tier, those units stay stuck -- that's the misplacement lesson.
+        target_h_total = S_high   # 1 unit per high-selling store
+        target_l_total = S_low    # 1 unit per low-selling  store
+        need_h = max(0, target_h_total - stock_high)
+        need_l = max(0, target_l_total - stock_low)
+        total_need = need_h + need_l
+        if total_need > 0 and wh > 0:
+            if total_need <= wh:
+                ship_h, ship_l = need_h, need_l
+            else:
+                ship_h = min(need_h, wh)        # HIGH first
+                ship_l = wh - ship_h
+            stock_high += ship_h
+            stock_low  += ship_l
+            wh -= (ship_h + ship_l)
 
         # 3. sales -- capped by integer stock (now topped up). With the
         #    recall above, lost sales only happen when total stock is
