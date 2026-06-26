@@ -22,6 +22,7 @@ import streamlit as st
 _STATIC_PAGES = [
     ("pages/Stash_or_Spread.py", "Where stock sits", "\U0001F4E6"),
     ("pages/Monte_Carlo.py",     "Random demand",    "\U0001F3B2"),
+    ("pages/Lifecycle.py",       "Buy × network","\U0001F3AF"),
     ("pages/Regional.py",        "Regional 2-RW",    "\U0001F30D"),
 ]
 
