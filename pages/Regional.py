@@ -577,13 +577,15 @@ with hc2:
 
 # ── Chain inventory chart ──────────────────────────────────────────────────
 st.markdown("### \U0001F4E6 End-of-week stock by location")
+# CW / RW are float-typed in the engine but always integer-valued (units of
+# product). Cast to int so the chart shows "100", not "100.0".
 inv_data = pd.DataFrame({
     'Week':  list(range(0, st.session_state.reg_weeks + 1)),
-    'CW':    [s['cw']   for s in r['states']],
-    'RW A':  [s['rw_a'] for s in r['states']],
-    'RW B':  [s['rw_b'] for s in r['states']],
-    'Stores A': [sum(s['stores_a']) for s in r['states']],
-    'Stores B': [sum(s['stores_b']) for s in r['states']],
+    'CW':    [int(round(s['cw']))   for s in r['states']],
+    'RW A':  [int(round(s['rw_a'])) for s in r['states']],
+    'RW B':  [int(round(s['rw_b'])) for s in r['states']],
+    'Stores A': [int(sum(s['stores_a'])) for s in r['states']],
+    'Stores B': [int(sum(s['stores_b'])) for s in r['states']],
 })
 inv_long = inv_data.melt('Week', ['CW', 'RW A', 'RW B', 'Stores A', 'Stores B'], var_name='Where', value_name='Units')
 ch3 = alt.Chart(inv_long).mark_area(opacity=0.7).encode(
