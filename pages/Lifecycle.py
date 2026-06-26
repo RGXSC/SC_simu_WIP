@@ -15,7 +15,7 @@ import pandas as pd
 import streamlit as st
 
 from sim_lifecycle import (
-    simulate, simulate_grid, horizon_weeks, PROFILES,
+    simulate, simulate_grid, horizon_weeks, demand_curve, PROFILES,
     HIGH_SHARE, HIGH_RATE_MULT,
 )
 from ui_nav import top_nav
@@ -76,17 +76,53 @@ with c4:
     var_cost = st.slider("Cost of goods (€/unit)",
                           min_value=10, max_value=500, value=350, step=10)
 
-l1, l2 = st.columns([1, 2])
-with l1:
-    lifespan_months = st.slider("Lifespan (months)",
-                                 min_value=1.0, max_value=6.0, value=2.0, step=0.5,
-                                 help="How long the SKU sells. The simulation "
-                                      "horizon = lifespan × 4.33 weeks.")
-with l2:
-    profile = st.radio("Demand profile",
-                        list(PROFILES.keys()), index=2, horizontal=True,
-                        help="Curve shape over the life: where the peak sits, "
-                             "how sharp it is.")
+lifespan_months = st.slider("Lifespan (months)",
+                             min_value=1.0, max_value=6.0, value=2.0, step=0.5,
+                             help="How long the SKU sells. The simulation horizon = "
+                                  "lifespan × 4.33 weeks.")
+
+# ── Demand profile picker with curve thumbnails ───────────────────────────
+# Matches the user's sketch: show a tiny curve of each shape next to its
+# name so you pick visually, not from a word in a radio button. The radio
+# stays as the source of truth; the thumbnails are decoration that updates
+# when you pick a new shape (the selected one renders in the accent blue).
+profile_keys = list(PROFILES.keys())
+_h_preview = horizon_weeks(lifespan_months)
+profile_thumb_cols = st.columns(len(profile_keys))
+
+def _thumb_chart(name: str, selected: bool) -> alt.Chart:
+    w = demand_curve(_h_preview, name)
+    df = pd.DataFrame({"week": np.arange(1, _h_preview + 1), "demand": w})
+    accent = "#1a4a8a" if selected else "#cfcfcf"
+    return (
+        alt.Chart(df)
+        .mark_area(opacity=0.85, color=accent, interpolate="monotone")
+        .encode(
+            x=alt.X("week:Q", axis=None,
+                    scale=alt.Scale(domain=[1, _h_preview])),
+            y=alt.Y("demand:Q", axis=None),
+        )
+        .properties(height=60)
+    )
+
+# Render the thumbnail row first, then the radio below. (We need to know
+# the selected profile to highlight the thumb, so the radio happens first
+# in code -- visually it sits below.)
+profile = st.radio(
+    "Demand profile shape", profile_keys, index=2, horizontal=True,
+    label_visibility="collapsed",
+    help="Curve shape over the SKU's life: where the peak sits and how sharp.",
+)
+for col, name in zip(profile_thumb_cols, profile_keys):
+    with col:
+        st.markdown(
+            f"<div style='text-align:center; font-size:12px; font-weight:600; "
+            f"color:{'#1a4a8a' if name == profile else '#5a6a80'};"
+            f"margin:0 0 -10px;'>{name}</div>",
+            unsafe_allow_html=True,
+        )
+        st.altair_chart(_thumb_chart(name, name == profile),
+                         use_container_width=True)
 
 
 # ─────────────────────────── run + headline ───────────────────────────────
@@ -125,119 +161,157 @@ with c_e:
 with st.expander("\U0001F4CA  Reveal 1 — What happens week by week",
                   expanded=True):
 
+    # Shared X-axis spec: weeks are INTEGERS, no 0.4 / 0.8 nonsense.
+    # `tickMinStep=1` forces ≥1-week ticks and `format='d'` strips decimals.
+    H = r["horizon"]
+    week_axis = alt.Axis(format="d", tickMinStep=1,
+                         labelFontSize=11, titleFontSize=12)
+    week_scale = alt.Scale(domain=[0, H], nice=False)
+
     # Build a long-form dataframe from the per-week states. The numeric
     # `order` column controls the stacking sequence (LOW at bottom, then
-    # HIGH, then warehouse on top).
+    # HIGH, then warehouse on top). Legend labels match the sketch:
+    # "Mid stock" = warehouse, "In store …" = on the shelf.
     rows = []
     for s in r["states"]:
-        rows.append({"week": s.week, "kind": "LOW-tier stores",
+        rows.append({"week": s.week, "kind": "In store (LOW)",
                      "stock": s.stock_low_total,  "order": 0})
-        rows.append({"week": s.week, "kind": "HIGH-tier stores",
+        rows.append({"week": s.week, "kind": "In store (HIGH)",
                      "stock": s.stock_high_total, "order": 1})
-        rows.append({"week": s.week, "kind": "Warehouse",
+        rows.append({"week": s.week, "kind": "Mid stock (WH)",
                      "stock": s.wh,               "order": 2})
     df_stock = pd.DataFrame(rows)
 
-    # Per-week sales + lost (flat dataframe for two charts)
+    # Weekly demand line (HIGH + LOW = total weekly demand on the SKU)
+    df_demand = pd.DataFrame([
+        {"week": s.week,
+         "demand": (s.sold_high + s.lost_high) + (s.sold_low + s.lost_low)}
+        for s in r["states"]
+    ])
+
+    # Per-week sales + lost (flat dataframe for the bar chart)
     rows_flow = []
     for s in r["states"][1:]:                # skip week 0 (pre-sales)
-        rows_flow.append({"week": s.week, "kind": "Sold (HIGH)",
+        rows_flow.append({"week": s.week, "kind": "% sold (HIGH)",
                           "units": s.sold_high})
-        rows_flow.append({"week": s.week, "kind": "Sold (LOW)",
+        rows_flow.append({"week": s.week, "kind": "% sold (LOW)",
                           "units": s.sold_low})
-        rows_flow.append({"week": s.week, "kind": "Lost (HIGH)",
+        rows_flow.append({"week": s.week, "kind": "Lost sales (HIGH)",
                           "units": s.lost_high})
-        rows_flow.append({"week": s.week, "kind": "Lost (LOW)",
+        rows_flow.append({"week": s.week, "kind": "Lost sales (LOW)",
                           "units": s.lost_low})
     df_flow = pd.DataFrame(rows_flow)
 
-    # Coverage (% stocked) per tier
+    # Coverage (% stocked) per tier — "% network well" in the sketch.
     rows_cov = []
     for s in r["states"]:
-        rows_cov.append({"week": s.week, "tier": "HIGH-tier stores",
+        rows_cov.append({"week": s.week, "tier": "HIGH-tier",
                          "pct": s.pct_high_stocked * 100})
-        rows_cov.append({"week": s.week, "tier": "LOW-tier stores",
+        rows_cov.append({"week": s.week, "tier": "LOW-tier",
                          "pct": s.pct_low_stocked  * 100})
     df_cov = pd.DataFrame(rows_cov)
 
     palette = {
-        "Warehouse":         "#9aa6b8",
-        "HIGH-tier stores":  "#1a8a4a",
-        "LOW-tier stores":   "#7fbf7b",
-        "Sold (HIGH)":       "#1a8a4a",
-        "Sold (LOW)":        "#7fbf7b",
-        "Lost (HIGH)":       "#c0392b",
-        "Lost (LOW)":        "#e88c7d",
+        "Mid stock (WH)":     "#9aa6b8",
+        "In store (HIGH)":    "#1a8a4a",
+        "In store (LOW)":     "#7fbf7b",
+        "% sold (HIGH)":      "#1a8a4a",
+        "% sold (LOW)":       "#7fbf7b",
+        "Lost sales (HIGH)":  "#c0392b",
+        "Lost sales (LOW)":   "#e88c7d",
     }
-    domain_stock = ["LOW-tier stores", "HIGH-tier stores", "Warehouse"]
+    domain_stock = ["In store (LOW)", "In store (HIGH)", "Mid stock (WH)"]
 
-    # ── Chart A: stacked stock by location ──
-    stock_chart = (
+    # ── Chart A: stacked stock by location + actual demand as a line ──
+    stock_area = (
         alt.Chart(df_stock)
         .mark_area(opacity=0.85, interpolate="monotone")
         .encode(
-            x=alt.X("week:Q", title="week",
-                    scale=alt.Scale(domain=[0, r["horizon"]])),
-            y=alt.Y("stock:Q", title="units of stock",
-                    stack="zero"),
+            x=alt.X("week:Q", title="week", axis=week_axis, scale=week_scale),
+            y=alt.Y("stock:Q", title="units of stock", stack="zero"),
             color=alt.Color("kind:N",
                              scale=alt.Scale(domain=domain_stock,
                                               range=[palette[k] for k in domain_stock]),
-                             legend=alt.Legend(title=None, orient="top")),
+                             legend=alt.Legend(title=None, orient="top",
+                                                labelFontSize=12)),
             order=alt.Order("order:Q"),
-            tooltip=["week:Q", "kind:N",
-                     alt.Tooltip("stock:Q", format=",.0f")],
+            tooltip=[alt.Tooltip("week:Q", title="week", format="d"),
+                     alt.Tooltip("kind:N",  title="location"),
+                     alt.Tooltip("stock:Q", format=",.0f", title="units")],
         )
-        .properties(height=250, title="Stock by location, week by week")
+    )
+    demand_line = (
+        alt.Chart(df_demand)
+        .mark_line(color="#1a4a8a", strokeWidth=2.5,
+                    point=alt.OverlayMarkDef(filled=True, size=50,
+                                              color="#1a4a8a"))
+        .encode(
+            x=alt.X("week:Q", axis=week_axis, scale=week_scale),
+            y=alt.Y("demand:Q"),
+            tooltip=[alt.Tooltip("week:Q", title="week", format="d"),
+                     alt.Tooltip("demand:Q", format=",.0f",
+                                  title="actual demand")],
+        )
+    )
+    stock_chart = (
+        (stock_area + demand_line)
+        .properties(height=420,
+                    title=alt.TitleParams(
+                        text="Stock by location (areas) and actual demand (line)",
+                        fontSize=14))
     )
 
-    # ── Chart B: per-tier coverage ──
+    # ── Chart B: per-tier coverage — sketch's "% network well" ──
     cov_chart = (
         alt.Chart(df_cov)
         .mark_line(point=True, strokeWidth=3)
         .encode(
-            x=alt.X("week:Q", title="week",
-                    scale=alt.Scale(domain=[0, r["horizon"]])),
+            x=alt.X("week:Q", title="week", axis=week_axis, scale=week_scale),
             y=alt.Y("pct:Q", title="% of tier's stores still able to sell",
                     scale=alt.Scale(domain=[0, 100])),
             color=alt.Color("tier:N",
-                             scale=alt.Scale(domain=["HIGH-tier stores",
-                                                      "LOW-tier stores"],
+                             scale=alt.Scale(domain=["HIGH-tier", "LOW-tier"],
                                               range=["#1a8a4a", "#7fbf7b"]),
-                             legend=alt.Legend(title=None, orient="top")),
-            tooltip=["week:Q", "tier:N",
-                     alt.Tooltip("pct:Q", format=".1f")],
+                             legend=alt.Legend(title=None, orient="top",
+                                                labelFontSize=12)),
+            tooltip=[alt.Tooltip("week:Q", title="week", format="d"),
+                     alt.Tooltip("tier:N", title="tier"),
+                     alt.Tooltip("pct:Q",  format=".1f", title="% stocked")],
         )
-        .properties(height=200,
-                    title="Coverage: % of each tier's network still stocked")
+        .properties(height=320,
+                    title=alt.TitleParams(
+                        text="% network well — coverage week by week",
+                        fontSize=14))
     )
 
     # ── Chart C: per-week sales & lost (split by tier) ──
-    domain_flow = ["Sold (HIGH)", "Sold (LOW)", "Lost (HIGH)", "Lost (LOW)"]
+    domain_flow = ["% sold (HIGH)", "% sold (LOW)",
+                   "Lost sales (HIGH)", "Lost sales (LOW)"]
     flow_chart = (
         alt.Chart(df_flow)
         .mark_bar()
         .encode(
-            x=alt.X("week:Q", title="week"),
+            x=alt.X("week:Q", title="week", axis=week_axis, scale=week_scale),
             y=alt.Y("units:Q", title="units"),
             color=alt.Color("kind:N",
                              scale=alt.Scale(domain=domain_flow,
                                               range=[palette[k] for k in domain_flow]),
-                             legend=alt.Legend(title=None, orient="top")),
+                             legend=alt.Legend(title=None, orient="top",
+                                                labelFontSize=12)),
             xOffset=alt.XOffset("kind:N"),
-            tooltip=["week:Q", "kind:N",
-                     alt.Tooltip("units:Q", format=",.1f")],
+            tooltip=[alt.Tooltip("week:Q", title="week", format="d"),
+                     alt.Tooltip("kind:N",  title="kind"),
+                     alt.Tooltip("units:Q", format=",.0f", title="units")],
         )
-        .properties(height=200,
-                    title="Sales and lost demand each week, by tier")
+        .properties(height=320,
+                    title=alt.TitleParams(
+                        text="Sales and lost demand each week, by tier",
+                        fontSize=14))
     )
 
     st.altair_chart(stock_chart, use_container_width=True)
-    cc1, cc2 = st.columns(2)
-    with cc1:
-        st.altair_chart(cov_chart, use_container_width=True)
-    with cc2:
-        st.altair_chart(flow_chart, use_container_width=True)
+    st.altair_chart(cov_chart,   use_container_width=True)
+    st.altair_chart(flow_chart,  use_container_width=True)
 
     st.caption(
         f"With **maison = {maison_size}** there are "
@@ -279,47 +353,56 @@ with st.expander("\U0001F4C8  Reveal 2 — Optimal (Network × Buy) matrix",
     # 'best' columns we can use to draw the highlighted markers.
     def _grid_chart(matrix, title, fmt, scheme="redyellowgreen",
                      reverse_color=False, highlight_color="#1a2a40"):
+        # Use the INTEGER fields for the axis encoding so altair sorts
+        # numerically (10, 30, 60, 120, 200, 300, 400, 500), not as strings
+        # (10, 120, 200, 30, 300, 400, 500, 60). Same for the column axis.
         rows = []
         for i, S in enumerate(nets):
             for j, N in enumerate(buys):
-                rows.append({"S": f"{S}", "N": f"{N}",
-                             "S_int": S, "N_int": N,
+                rows.append({"S": int(S), "N": int(N),
                              "value": float(matrix[i, j])})
         df = pd.DataFrame(rows)
         bi = np.unravel_index(matrix.argmax(), matrix.shape)
-        best = (f"{nets[bi[0]]}", f"{buys[bi[1]]}")
+        best_S, best_N = int(nets[bi[0]]), int(buys[bi[1]])
         bv = float(matrix[bi])
+
+        x_sorted = sorted(set(int(b) for b in buys))
+        y_sorted = sorted(set(int(s) for s in nets))
 
         heat = (alt.Chart(df).mark_rect(stroke="white", strokeWidth=2)
                 .encode(
-                    x=alt.X("N:O", sort=[f"{n}" for n in buys],
+                    x=alt.X("N:O", sort=x_sorted,
                             axis=alt.Axis(orient="top", labelAngle=0,
                                           labelFontSize=11, labelFontWeight="bold"),
                             title="Buy (units)"),
-                    y=alt.Y("S:O", sort=[f"{n}" for n in nets],
+                    y=alt.Y("S:O", sort=y_sorted,
                             axis=alt.Axis(labelFontSize=11, labelFontWeight="bold"),
                             title="SKU network (stores)"),
                     color=alt.Color("value:Q",
                                      scale=alt.Scale(scheme=scheme,
                                                      reverse=reverse_color),
                                      legend=None),
-                    tooltip=[alt.Tooltip("S_int:Q", title="SKU network"),
-                             alt.Tooltip("N_int:Q", title="Buy"),
+                    tooltip=[alt.Tooltip("S:Q", title="SKU network"),
+                             alt.Tooltip("N:Q", title="Buy"),
                              alt.Tooltip("value:Q", format=fmt, title=title)]
                 ))
         labels = (alt.Chart(df).mark_text(fontSize=10, color="#1a2a40")
-                  .encode(x="N:O", y="S:O", text=alt.Text("value:Q", format=fmt)))
+                  .encode(x=alt.X("N:O", sort=x_sorted),
+                          y=alt.Y("S:O", sort=y_sorted),
+                          text=alt.Text("value:Q", format=fmt)))
 
-        # Draw a bold outline on the best cell
-        best_df = pd.DataFrame([{"S": best[0], "N": best[1], "value": bv}])
+        # Bold outline on the best cell
+        best_df = pd.DataFrame([{"S": best_S, "N": best_N, "value": bv}])
         marker = (alt.Chart(best_df).mark_rect(
                     fill=None, stroke=highlight_color, strokeWidth=4)
-                  .encode(x="N:O", y="S:O"))
+                  .encode(x=alt.X("N:O", sort=x_sorted),
+                          y=alt.Y("S:O", sort=y_sorted)))
 
         return (heat + labels + marker).properties(
             height=len(nets) * 36 + 30,
-            title=alt.TitleParams(text=f"{title}  (best @ S={best[0]}, N={best[1]} → {format(bv, fmt)})",
-                                   fontSize=12, anchor="start"))
+            title=alt.TitleParams(
+                text=f"{title}  (best @ S={best_S}, N={best_N} → {format(bv, fmt)})",
+                fontSize=12, anchor="start"))
 
     st.altair_chart(
         _grid_chart(g["sales"],     "Sales (€)",   ",.0f",
