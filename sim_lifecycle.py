@@ -97,8 +97,13 @@ def simulate(maison_size: int, sku_network: int, buy: int,
 
     All inputs validated/clipped to safe ranges so the function is total."""
     M = max(1, int(maison_size))
-    S = max(0, min(int(sku_network), M))
+    S_chosen = max(0, min(int(sku_network), M))
     N = max(0, int(buy))
+    # Can't stock more stores than units bought (1 unit per store at day 1).
+    # The effective network is bounded by N. This silently clamps when the
+    # user picks an over-wide network for their buy; the page surfaces this
+    # in a banner so the gap stays visible.
+    S = min(S_chosen, N)
     horizon = horizon_weeks(lifespan_months)
 
     # Top-down placement: best stores first.
@@ -117,24 +122,23 @@ def simulate(maison_size: int, sku_network: int, buy: int,
                               price, var_cost)
 
     # Per-week demand FOR EACH TIER AS A WHOLE (sum over its stores).
+    # These are floats. Each week we draw an INTEGER demand by taking the
+    # increment of the cumulative floored demand -- so the per-week unit
+    # counts are whole pieces and the season total still equals N exactly.
     demand_high_week = N * weights * (S_high * HIGH_RATE_MULT) / footprint
     demand_low_week  = N * weights * (S_low  * 1.0           ) / footprint
-
-    # Per-STORE rate (used by the planner's smart target). Same value every
-    # week if the profile were flat; here it tracks the curve so the refill
-    # target is "2 weeks of the upcoming demand".
-    def _rate_high(t):
-        # use this week's per-store rate as the planner's belief about cover
-        return demand_high_week[t] / S_high if S_high > 0 else 0.0
-    def _rate_low(t):
-        return demand_low_week[t]  / S_low  if S_low  > 0 else 0.0
+    cum_high_float = np.cumsum(demand_high_week)
+    cum_low_float  = np.cumsum(demand_low_week)
+    cum_high_int = 0                                 # integer demand drawn so far
+    cum_low_int  = 0
 
     # Day-1 allocation: 1 unit per SKU-network store, remainder in WH.
-    stock_high = float(S_high)
-    stock_low  = float(S_low)
-    wh         = float(max(0, N - S))
-    in_transit_high = 0.0
-    in_transit_low  = 0.0
+    # ALL stock quantities below are integer pieces -- we don't sell halves.
+    stock_high = int(S_high)
+    stock_low  = int(S_low)
+    wh         = int(max(0, N - S))
+    in_transit_high = 0
+    in_transit_low  = 0
 
     states: list[WeekState] = [
         WeekState(0, wh, stock_high, stock_low, 0, 0, 0, 0,
@@ -147,9 +151,15 @@ def simulate(maison_size: int, sku_network: int, buy: int,
         stock_high += in_transit_high
         stock_low  += in_transit_low
 
-        # 2. sales — capped by stock
-        d_h = demand_high_week[t]
-        d_l = demand_low_week[t]
+        # 2. discretise this week's demand into INTEGER pieces.
+        new_cum_h = int(np.floor(cum_high_float[t] + 1e-9))
+        new_cum_l = int(np.floor(cum_low_float[t]  + 1e-9))
+        d_h = new_cum_h - cum_high_int
+        d_l = new_cum_l - cum_low_int
+        cum_high_int = new_cum_h
+        cum_low_int  = new_cum_l
+
+        # 3. sales -- capped by integer stock
         sold_h = min(stock_high, d_h)
         sold_l = min(stock_low,  d_l)
         stock_high -= sold_h
@@ -157,24 +167,37 @@ def simulate(maison_size: int, sku_network: int, buy: int,
         lost_h = d_h - sold_h
         lost_l = d_l - sold_l
 
-        # 3. refill from WH (planner smart, 2-wk target, water-fill).
-        #    Last week places no order — it could never land in season.
-        in_transit_high = in_transit_low = 0.0
+        # 4. refill from WH (planner smart, 2-wk target, water-fill).
+        #    Last week places no order -- it could never land in season.
+        in_transit_high = in_transit_low = 0
         place_orders = (t < horizon - 1) and (wh > 0)
         if place_orders:
-            target_h_total = COVER_TARGET_WEEKS * _rate_high(t) * S_high
-            target_l_total = COVER_TARGET_WEEKS * _rate_low(t)  * S_low
-            need_h = max(0.0, target_h_total - stock_high)
-            need_l = max(0.0, target_l_total - stock_low)
+            # Per-store rate this week (float). Target = 2 weeks of cover,
+            # rounded to integer pieces for the order quantity.
+            rate_h = demand_high_week[t] / S_high if S_high > 0 else 0.0
+            rate_l = demand_low_week[t]  / S_low  if S_low  > 0 else 0.0
+            target_h_total = int(round(COVER_TARGET_WEEKS * rate_h * S_high))
+            target_l_total = int(round(COVER_TARGET_WEEKS * rate_l * S_low))
+            need_h = max(0, target_h_total - stock_high)
+            need_l = max(0, target_l_total - stock_low)
             total_need = need_h + need_l
             if total_need > 0:
-                frac = min(1.0, wh / total_need)
-                in_transit_high = need_h * frac
-                in_transit_low  = need_l * frac
-                wh -= (in_transit_high + in_transit_low)
+                if total_need <= wh:
+                    ship_h, ship_l = need_h, need_l
+                else:
+                    # Water-fill in integer pieces. Round HIGH first
+                    # (the bigger need), give remainder to LOW.
+                    ship_h = min(int(round(need_h * wh / total_need)), need_h, wh)
+                    ship_l = min(wh - ship_h, need_l)
+                    if ship_l < 0:
+                        ship_l = 0
+                in_transit_high = ship_h
+                in_transit_low  = ship_l
+                wh -= (ship_h + ship_l)
 
-        # Per-tier coverage: aggregate stock divided by stores. Capped at 1
-        # because >1 unit/store still reads as "100% covered".
+        # Per-tier coverage: integer stock divided by store count, capped at 1.
+        # Equivalent to "fraction of stores still holding >=1 unit" under
+        # uniform within-tier distribution.
         pct_h = min(1.0, stock_high / S_high) if S_high > 0 else 0.0
         pct_l = min(1.0, stock_low  / S_low ) if S_low  > 0 else 0.0
 
@@ -195,6 +218,8 @@ def simulate(maison_size: int, sku_network: int, buy: int,
     return {
         "states":            states,
         "horizon":           horizon,
+        "S_chosen":          S_chosen,    # what the user asked for
+        "S_effective":       S,           # what the model actually used
         "S_high":            S_high,
         "S_low":             S_low,
         "M_high":            M_high,

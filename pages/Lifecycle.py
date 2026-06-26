@@ -93,6 +93,17 @@ with l2:
 r = simulate(maison_size, sku_network, buy, lifespan_months, profile,
              price=float(price), var_cost=float(var_cost))
 
+# Surface when the user's network choice exceeds the buy (1 unit/store rule
+# caps it). We don't fail silently -- the metric strip below still reflects
+# the EFFECTIVE network, but this banner explains why.
+if r["S_effective"] < r["S_chosen"]:
+    st.warning(
+        f"You picked an SKU network of **{r['S_chosen']}** stores but only "
+        f"bought **{r['bought']}** units. With 1 unit per store on day 1, "
+        f"only **{r['S_effective']}** stores can actually be stocked. The "
+        "matrix below and the chart use that effective network.",
+        icon="⚠️")
+
 c_a, c_b, c_c, c_d, c_e = st.columns(5)
 with c_a:
     st.metric("Bought (units)", f"{r['bought']:,}")
