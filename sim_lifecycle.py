@@ -83,16 +83,24 @@ def demand_curve(horizon: int, profile: str) -> np.ndarray:
 class WeekState:
     """Stock + flow snapshot at the end of a week (or week 0 = pre-sales).
 
-    The four stock pools (stock_high_total, stock_low_total, wh_perform,
-    wh_overperform) are a DISJOINT decomposition of all stock on hand --
-    they sum to the total. Store stock is shown raw, so any units stranded
-    in low-selling stores stay visible as a stubborn band that doesn't
-    deplete. The warehouse split tells you what its remaining stock is
-    actually doing: 'perform' = will be shipped to cover the rest of the
-    forecast; 'overperform' = excess buffer the warehouse holds beyond
-    forecast needs (would only sell if demand surprises up). In a
-    deterministic demand = buy model, overperform drains to 0 once the
-    warehouse drains -- that's the lesson the user wanted to see.
+    Four DISJOINT stock pools (sum = wh + stock_high_total + stock_low_total):
+
+      high_committed  = stock in high-selling stores that will still serve
+                        future demand (= min(stock_high, remaining high demand))
+      low_committed   = stock in low-selling stores that will still serve
+                        future demand (= min(stock_low,  remaining low  demand))
+      wh_perform      = warehouse stock that will be shipped to fulfil the
+                        demand the stores can't (= min(wh, unmet))
+      overperform     = everything else -- stock currently on hand with no
+                        remaining forecast demand to match. Includes units
+                        stranded in low-selling stores that demand will never
+                        reach, plus any warehouse excess.
+
+    This is the "skus above network + forecast" pool the user asked for.
+    It STARTS AT 0 (everything was bought to demand) and grows over the
+    season as lost-sales accumulate -- because every unit of demand that
+    a store couldn't fulfil leaves a matching unit of stock on hand with
+    no demand to absorb it.
     """
     week:              int    # 0..horizon
     wh:                int    # warehouse stock at end of week
@@ -104,9 +112,11 @@ class WeekState:
     lost_low:          int
     pct_high_stocked:  float  # fraction of HIGH stores still able to sell (0..1)
     pct_low_stocked:   float  # same for LOW stores
-    # ── warehouse split (wh_perform + wh_overperform == wh) ──
-    wh_perform:        int    # warehouse stock that will ship to meet forecast
-    wh_overperform:    int    # warehouse stock beyond forecast needs (upside buffer)
+    # ── four-pool decomposition (sums to total stock on hand) ──
+    high_committed:    int
+    low_committed:     int
+    wh_perform:        int
+    overperform:       int
 
 
 # ───────────────────────────── the engine ─────────────────────────────────
@@ -162,27 +172,29 @@ def simulate(maison_size: int, sku_network: int, buy: int,
     stock_low  = int(S_low)
     wh         = int(max(0, N - S))
 
-    def _wh_split(w, sh, sl, rem_h, rem_l):
-        """Split the WAREHOUSE stock into two pools:
-          - wh_perform     = portion the warehouse will ship to meet
-                             remaining forecast demand (capped by w).
-          - wh_overperform = whatever's left over -- excess buffer that
-                             would only sell if demand surprises above
-                             forecast. In a deterministic demand=buy run
-                             this drains to 0 once the warehouse drains.
-        Store stock (sh, sl) is shown raw on the chart; stranded stock in
-        the wrong tier stays visible as a band that doesn't deplete."""
-        unmet = max(0, rem_h - sh) + max(0, rem_l - sl)
-        wp = min(w, unmet)
-        return wp, w - wp
+    def _decomp(sh, sl, w, rem_h, rem_l):
+        """Four-pool decomposition of stock on hand.
 
-    wh_p, wh_o = _wh_split(wh, stock_high, stock_low,
-                            total_demand_high, total_demand_low)
+        high_committed = what high stores will still serve
+        low_committed  = what low stores will still serve
+        wh_perform     = warehouse stock that will ship to cover the gap
+        overperform    = everything else: stock with no demand to absorb it
+                         (stranded in low-selling stores + warehouse excess)
+        The four sum to sh + sl + w."""
+        hc = min(sh, max(0, rem_h))
+        lc = min(sl, max(0, rem_l))
+        unmet = max(0, rem_h - hc) + max(0, rem_l - lc)
+        wp = min(w, unmet)
+        over = (sh - hc) + (sl - lc) + (w - wp)
+        return hc, lc, wp, over
+
+    hc, lc, wp, over = _decomp(stock_high, stock_low, wh,
+                                total_demand_high, total_demand_low)
     states: list[WeekState] = [
         WeekState(0, wh, stock_high, stock_low, 0, 0, 0, 0,
                   1.0 if S_high > 0 else 0.0,
                   1.0 if S_low  > 0 else 0.0,
-                  wh_p, wh_o)
+                  hc, lc, wp, over)
     ]
 
     for t in range(horizon):
@@ -224,10 +236,10 @@ def simulate(maison_size: int, sku_network: int, buy: int,
         lost_h = d_h - sold_h
         lost_l = d_l - sold_l
 
-        # 4. Split warehouse stock against demand STILL to come.
+        # 4. Decompose stock on hand against demand STILL to come.
         rem_h = total_demand_high - cum_high_int
         rem_l = total_demand_low  - cum_low_int
-        wh_p, wh_o = _wh_split(wh, stock_high, stock_low, rem_h, rem_l)
+        hc, lc, wp, over = _decomp(stock_high, stock_low, wh, rem_h, rem_l)
 
         # Per-tier coverage: integer stock divided by store count, capped at 1.
         pct_h = min(1.0, stock_high / S_high) if S_high > 0 else 0.0
@@ -235,7 +247,7 @@ def simulate(maison_size: int, sku_network: int, buy: int,
 
         states.append(WeekState(t + 1, wh, stock_high, stock_low,
                                  sold_h, sold_l, lost_h, lost_l,
-                                 pct_h, pct_l, wh_p, wh_o))
+                                 pct_h, pct_l, hc, lc, wp, over))
 
     # ── Season totals ──
     sold  = sum(s.sold_high + s.sold_low for s in states)
@@ -274,7 +286,7 @@ def _empty_result(M, S, N, horizon, S_high, S_low, price, var_cost):
                         0, 0, 0, 0,
                         1.0 if S_high > 0 else 0.0,
                         1.0 if S_low  > 0 else 0.0,
-                        wh0, 0)
+                        int(S_high), int(S_low), 0, wh0)
               for t in range(horizon + 1)]
     return {
         "states":           states, "horizon": horizon,
