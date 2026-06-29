@@ -172,41 +172,36 @@ def simulate(maison_size: int, sku_network: int, buy: int,
     stock_low  = int(S_low)
     wh         = int(max(0, N - S))
 
-    def _next_demand(t_now: int, window: int) -> int:
-        """Integer demand expected over the next `window` weeks (both tiers),
-        starting from week `t_now` (inclusive)."""
-        t_end = min(horizon, t_now + window)
-        if t_end <= t_now:
-            return 0
-        h = float(demand_high_week[t_now:t_end].sum())
-        l = float(demand_low_week[t_now:t_end].sum())
-        return int(round(h + l))
+    def _decomp(sh, sl, w, rem_total):
+        """Three-bucket decomposition of stock on hand (sums to sh+sl+w):
 
-    def _decomp(sh, sl, w, t_now):
-        """Four-pool decomposition of stock on hand.
+          in network    = stock on store shelves (sh high + sl low). Every
+                          unit physically in a store, whether it will sell
+                          (high stores) or sit stranded (over-stocked low
+                          stores) -- both are "in the network".
+          above network, WITHIN forecast (wh_perform) = warehouse stock
+                          that the demand STILL to come will pull out
+                          (after what the shelves already cover).
+          above network AND forecast (overperform) = warehouse stock beyond
+                          ALL remaining forecast demand. This is the genuine
+                          excess: there is no demand left anywhere to absorb
+                          it. It is 0 whenever the warehouse will be fully
+                          consumed by demand, and only positive when you
+                          bought more than the network can ever sell.
 
-          high_committed / low_committed = raw store stocks (everything
-                                            currently on shelves; with
-                                            tier-to-tier transfers a unit
-                                            here is always "in play").
-          wh_perform     = warehouse stock that next 2 weeks of demand
-                            will need (after what stores already hold).
-          overperform    = warehouse stock BEYOND that 2-week buffer --
-                            available to serve surprise upside demand,
-                            and drains to 0 as the warehouse empties at
-                            end of life. THIS is what "above network +
-                            forecast" means: surplus held back for
-                            potential surprise, not stranded units.
-        Sum: sh + sl + w."""
-        # Demand in the next 2 weeks (so it can shrink to 0 at end of life).
-        future = _next_demand(t_now, COVER_TARGET_WEEKS)
-        already_in_stores = sh + sl
-        wh_needed = max(0, future - already_in_stores)
-        wp = min(w, wh_needed)
-        over = w - wp
+        Because overperform is "warehouse minus remaining demand", it can
+        NEVER coexist with a store losing a sale: a lost sale means the
+        warehouse is empty (it shipped everything it could), so w = 0 and
+        both warehouse buckets are 0.
+        """
+        in_stores = sh + sl
+        wh_needed = max(0, rem_total - in_stores)
+        wp = min(w, wh_needed)             # warehouse the forecast will pull
+        over = w - wp                      # warehouse beyond all forecast
         return sh, sl, wp, over
 
-    hc, lc, wp, over = _decomp(stock_high, stock_low, wh, 0)
+    rem_total0 = total_demand_high + total_demand_low
+    hc, lc, wp, over = _decomp(stock_high, stock_low, wh, rem_total0)
     states: list[WeekState] = [
         WeekState(0, wh, stock_high, stock_low, 0, 0, 0, 0,
                   1.0 if S_high > 0 else 0.0,
@@ -223,18 +218,16 @@ def simulate(maison_size: int, sku_network: int, buy: int,
         cum_high_int = new_cum_h
         cum_low_int  = new_cum_l
 
-        # 2. INSTANT replenishment (no lead-time lag): the warehouse tops
-        #    each store back up to its day-1 baseline of 1 unit per store
-        #    -- i.e. ships every store exactly what it sold last week.
-        #    High-selling stores get served first when the warehouse cannot
-        #    cover both tiers. No transfer between stores: once a unit sits
-        #    in a low-selling store it stays there. If low stores' day-1
-        #    units never move while the warehouse drains topping the high
-        #    tier, those units stay stuck -- that's the misplacement lesson.
-        target_h_total = S_high   # 1 unit per high-selling store
-        target_l_total = S_low    # 1 unit per low-selling  store
-        need_h = max(0, target_h_total - stock_high)
-        need_l = max(0, target_l_total - stock_low)
+        # 2. INSTANT replenishment (no lead-time lag): the warehouse ships
+        #    each store ENOUGH TO MEET THIS WEEK'S DEMAND, before sales.
+        #    High-selling stores are served first when the warehouse cannot
+        #    cover both tiers. No transfer between stores: a low store that
+        #    already holds more than it will sell keeps that stock (it needs
+        #    nothing), so those day-1 units sit stranded -- the misplacement
+        #    lesson. A high store can therefore NEVER lose a sale while the
+        #    warehouse still holds a unit (it would have shipped it).
+        need_h = max(0, d_h - stock_high)
+        need_l = max(0, d_l - stock_low)
         total_need = need_h + need_l
         if total_need > 0 and wh > 0:
             if total_need <= wh:
@@ -246,9 +239,9 @@ def simulate(maison_size: int, sku_network: int, buy: int,
             stock_low  += ship_l
             wh -= (ship_h + ship_l)
 
-        # 3. sales -- capped by integer stock (now topped up). With the
-        #    recall above, lost sales only happen when total stock is
-        #    genuinely below total demand.
+        # 3. sales -- capped by integer stock (now topped up). Lost sales
+        #    happen only when the warehouse is empty and the shelf can't
+        #    cover demand -- i.e. genuine shortage, never while stock waits.
         sold_h = min(stock_high, d_h)
         sold_l = min(stock_low,  d_l)
         stock_high -= sold_h
@@ -256,10 +249,10 @@ def simulate(maison_size: int, sku_network: int, buy: int,
         lost_h = d_h - sold_h
         lost_l = d_l - sold_l
 
-        # 4. Decompose stock on hand. The warehouse 'available to perform'
-        #    pool is what the next 2 weeks of demand will need; everything
-        #    else in the warehouse is 'available to overperform'.
-        hc, lc, wp, over = _decomp(stock_high, stock_low, wh, t + 1)
+        # 4. Decompose stock on hand against the demand STILL to come.
+        rem_total = (total_demand_high - cum_high_int) + \
+                    (total_demand_low - cum_low_int)
+        hc, lc, wp, over = _decomp(stock_high, stock_low, wh, rem_total)
 
         # Per-tier coverage: integer stock divided by store count, capped at 1.
         pct_h = min(1.0, stock_high / S_high) if S_high > 0 else 0.0
