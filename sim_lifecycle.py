@@ -81,42 +81,32 @@ def demand_curve(horizon: int, profile: str) -> np.ndarray:
 
 @dataclass
 class WeekState:
-    """Stock + flow snapshot at the end of a week (or week 0 = pre-sales).
+    """Stock + flow snapshot for one week (week 0 = day-1 allocation).
 
-    Four DISJOINT stock pools (sum = wh + stock_high_total + stock_low_total):
+    Two views of stock are kept:
 
-      high_committed  = stock in high-selling stores that will still serve
-                        future demand (= min(stock_high, remaining high demand))
-      low_committed   = stock in low-selling stores that will still serve
-                        future demand (= min(stock_low,  remaining low  demand))
-      wh_perform      = warehouse stock that will be shipped to fulfil the
-                        demand the stores can't (= min(wh, unmet))
-      overperform     = everything else -- stock currently on hand with no
-                        remaining forecast demand to match. Includes units
-                        stranded in low-selling stores that demand will never
-                        reach, plus any warehouse excess.
-
-    This is the "skus above network + forecast" pool the user asked for.
-    It STARTS AT 0 (everything was bought to demand) and grows over the
-    season as lost-sales accumulate -- because every unit of demand that
-    a store couldn't fulfil leaves a matching unit of stock on hand with
-    no demand to absorb it.
+      * end-of-week (post-sales): wh / stock_high_total / stock_low_total.
+        Used for the season totals (the 'stuck' at end of life).
+      * start-of-week AFTER the warehouse has refilled but BEFORE that
+        week's sales: pre_wh / pre_high / pre_low. This is what the stock
+        chart shows -- you see the stock actually sitting in the network at
+        the moment selling starts, not the empty shelves left afterwards.
+        The three pre_* fields sum to total stock on hand that week.
     """
     week:              int    # 0..horizon
-    wh:                int    # warehouse stock at end of week
-    stock_high_total:  int    # sum of stock across the S_high HIGH-tier stores
-    stock_low_total:   int    # sum of stock across the S_low LOW-tier stores
+    wh:                int    # warehouse stock at END of week (post-sales)
+    stock_high_total:  int    # HIGH-tier shelf stock at END of week
+    stock_low_total:   int    # LOW-tier  shelf stock at END of week
     sold_high:         int    # sales by the HIGH tier this week
     sold_low:          int
     lost_high:         int    # demand the HIGH tier couldn't fulfil this week
     lost_low:          int
     pct_high_stocked:  float  # fraction of HIGH stores still able to sell (0..1)
     pct_low_stocked:   float  # same for LOW stores
-    # ── four-pool decomposition (sums to total stock on hand) ──
-    high_committed:    int
-    low_committed:     int
-    wh_perform:        int
-    overperform:       int
+    # ── start-of-week, post-refill, PRE-sales (what the chart shows) ──
+    pre_high:          int    # HIGH-tier shelf stock once refilled, before selling
+    pre_low:           int    # LOW-tier  shelf stock once refilled, before selling
+    pre_wh:            int    # warehouse stock after it has shipped this week
 
 
 # ───────────────────────────── the engine ─────────────────────────────────
@@ -172,41 +162,12 @@ def simulate(maison_size: int, sku_network: int, buy: int,
     stock_low  = int(S_low)
     wh         = int(max(0, N - S))
 
-    def _decomp(sh, sl, w, rem_total):
-        """Three-bucket decomposition of stock on hand (sums to sh+sl+w):
-
-          in network    = stock on store shelves (sh high + sl low). Every
-                          unit physically in a store, whether it will sell
-                          (high stores) or sit stranded (over-stocked low
-                          stores) -- both are "in the network".
-          above network, WITHIN forecast (wh_perform) = warehouse stock
-                          that the demand STILL to come will pull out
-                          (after what the shelves already cover).
-          above network AND forecast (overperform) = warehouse stock beyond
-                          ALL remaining forecast demand. This is the genuine
-                          excess: there is no demand left anywhere to absorb
-                          it. It is 0 whenever the warehouse will be fully
-                          consumed by demand, and only positive when you
-                          bought more than the network can ever sell.
-
-        Because overperform is "warehouse minus remaining demand", it can
-        NEVER coexist with a store losing a sale: a lost sale means the
-        warehouse is empty (it shipped everything it could), so w = 0 and
-        both warehouse buckets are 0.
-        """
-        in_stores = sh + sl
-        wh_needed = max(0, rem_total - in_stores)
-        wp = min(w, wh_needed)             # warehouse the forecast will pull
-        over = w - wp                      # warehouse beyond all forecast
-        return sh, sl, wp, over
-
-    rem_total0 = total_demand_high + total_demand_low
-    hc, lc, wp, over = _decomp(stock_high, stock_low, wh, rem_total0)
+    # Week 0 = day-1 allocation. Pre-sales view == the allocation itself.
     states: list[WeekState] = [
         WeekState(0, wh, stock_high, stock_low, 0, 0, 0, 0,
                   1.0 if S_high > 0 else 0.0,
                   1.0 if S_low  > 0 else 0.0,
-                  hc, lc, wp, over)
+                  stock_high, stock_low, wh)
     ]
 
     for t in range(horizon):
@@ -239,6 +200,11 @@ def simulate(maison_size: int, sku_network: int, buy: int,
             stock_low  += ship_l
             wh -= (ship_h + ship_l)
 
+        # Snapshot the network AFTER refill, BEFORE sales -- this is what the
+        # stock chart shows (the stock actually sitting in stores/warehouse
+        # at the moment selling begins, not the empty shelves left after).
+        pre_high, pre_low, pre_wh = stock_high, stock_low, wh
+
         # 3. sales -- capped by integer stock (now topped up). Lost sales
         #    happen only when the warehouse is empty and the shelf can't
         #    cover demand -- i.e. genuine shortage, never while stock waits.
@@ -249,18 +215,13 @@ def simulate(maison_size: int, sku_network: int, buy: int,
         lost_h = d_h - sold_h
         lost_l = d_l - sold_l
 
-        # 4. Decompose stock on hand against the demand STILL to come.
-        rem_total = (total_demand_high - cum_high_int) + \
-                    (total_demand_low - cum_low_int)
-        hc, lc, wp, over = _decomp(stock_high, stock_low, wh, rem_total)
-
         # Per-tier coverage: integer stock divided by store count, capped at 1.
         pct_h = min(1.0, stock_high / S_high) if S_high > 0 else 0.0
         pct_l = min(1.0, stock_low  / S_low ) if S_low  > 0 else 0.0
 
         states.append(WeekState(t + 1, wh, stock_high, stock_low,
                                  sold_h, sold_l, lost_h, lost_l,
-                                 pct_h, pct_l, hc, lc, wp, over))
+                                 pct_h, pct_l, pre_high, pre_low, pre_wh))
 
     # ── Season totals ──
     sold  = sum(s.sold_high + s.sold_low for s in states)
@@ -299,7 +260,7 @@ def _empty_result(M, S, N, horizon, S_high, S_low, price, var_cost):
                         0, 0, 0, 0,
                         1.0 if S_high > 0 else 0.0,
                         1.0 if S_low  > 0 else 0.0,
-                        int(S_high), int(S_low), 0, wh0)
+                        int(S_high), int(S_low), wh0)
               for t in range(horizon + 1)]
     return {
         "states":           states, "horizon": horizon,

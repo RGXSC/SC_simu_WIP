@@ -178,10 +178,13 @@ with st.expander("\U0001F4CA  Reveal 1 — What happens week by week",
     # that's the misplacement lesson, visible without any extra band.
     # (Under demand = buy there is no genuine "above forecast" pool, so the
     # old fourth band was always ~0 and has been removed.)
+    # Pre-sales snapshot (after the warehouse refills, before the week's
+    # sales) so the bands show the stock actually sitting in the network
+    # when selling starts -- not the empty shelves left at end of week.
     STOCK_SERIES = [
-        ("In network — high-selling stores", "stock_high_total", 0, "#1a6b3a"),
-        ("In network — low-selling stores",  "stock_low_total",  1, "#7fbf7b"),
-        ("In the warehouse (waiting to ship)", "wh",             2, "#5a7fb0"),
+        ("In network — high-selling stores", "pre_high", 0, "#1a6b3a"),
+        ("In network — low-selling stores",  "pre_low",  1, "#7fbf7b"),
+        ("In the warehouse (waiting to ship)", "pre_wh", 2, "#5a7fb0"),
     ]
     rows = []
     for s in r["states"]:
