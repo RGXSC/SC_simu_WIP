@@ -199,10 +199,10 @@ with st.expander("\U0001F4CA  Reveal 1 — What happens week by week",
     # The warehouse split (3 vs 4) is computed per week from that week's
     # demand; the network bands are left untouched.
     STACK = [
-        ("In network — high-selling stores",                       "#1a6b3a"),
-        ("In network — low-selling stores",                        "#7fbf7b"),
-        ("Warehouse — covers this week's forecast",                "#5a7fb0"),
-        ("Warehouse — above forecast (potential to overperform)",  "#d97757"),
+        ("In network — high-selling stores",                                "#1a6b3a"),
+        ("In network — low-selling stores",                                 "#7fbf7b"),
+        ("Warehouse — covers current week forecast while leaving network untouched", "#5a7fb0"),
+        ("Warehouse — covers potential overperformance",                    "#d97757"),
     ]
     rows = []
     for s in r["states"]:
@@ -260,7 +260,8 @@ with st.expander("\U0001F4CA  Reveal 1 — What happens week by week",
             color=alt.Color("kind:N",
                              scale=alt.Scale(domain=stock_domain, range=stock_range),
                              legend=alt.Legend(title=None, orient="top",
-                                                labelFontSize=12, columns=2)),
+                                                labelFontSize=12, columns=1,
+                                                labelLimit=0, symbolLimit=0)),
             order=alt.Order("order:Q"),
             tooltip=[alt.Tooltip("week:Q", title="week", format="d"),
                      alt.Tooltip("kind:N",  title="stock pool"),
