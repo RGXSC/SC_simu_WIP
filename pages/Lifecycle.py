@@ -40,10 +40,12 @@ st.markdown(
 st.markdown(
     "<div style='color:#5a6a80; font-size:14px; margin-bottom:14px;'>"
     "Pick how many units to buy and how many stores to sell them in, then "
-    "watch one product sell down over its life. Your stores split into "
-    "20% high-selling and 80% low-selling (the 80/20 rule, measured on your "
-    "whole chain). You always place the product in your best stores "
-    "first.</div>",
+    "watch one product sell down over its life. Your chain follows the "
+    "<b>80/20 rule</b>: the top <b>20% of stores generate 80% of demand</b>, "
+    "while the other <b>80% of stores generate just 20%</b> — so a "
+    "high-selling store sells about <b>16× as fast</b> as a low-selling one. "
+    "You always place the product in your best stores first, so widening the "
+    "network means reaching progressively weaker stores.</div>",
     unsafe_allow_html=True,
 )
 
@@ -388,13 +390,19 @@ with st.expander("\U0001F4C8  Reveal 2 — Optimal (Network × Buy) matrix",
             col_max = float(col.max()); col_min = float(col.min())
             thresh = col_max * (1.0 - TOL) if col_max >= 0 else col_max * (1.0 + TOL)
             span = col_max - col_min
+            # A column whose best and worst differ by less than the 1%
+            # tolerance is effectively FLAT -- every store count is just as
+            # good for that buy. Paint it all best-green instead of letting
+            # the per-column normalisation amplify rounding noise into a
+            # misleading pale-to-green gradient (the stray "white" cells).
+            col_flat = span <= TOL * abs(col_max)
             for i, S in enumerate(nets):
                 v = float(matrix[i, j])
-                rel = (v - col_min) / span if span > 0 else 1.0
+                rel = 1.0 if (col_flat or span <= 0) else (v - col_min) / span
                 rows.append({"S": int(S), "N": int(N), "value": v,
                              "rel": rel,
                              "label": fmt_cell(v),
-                             "best": bool(v >= thresh)})
+                             "best": bool(col_flat or v >= thresh)})
         df = pd.DataFrame(rows)
 
         # Per-column gradient: off-white (worst in column) -> deep green
