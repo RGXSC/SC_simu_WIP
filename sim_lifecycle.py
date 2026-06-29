@@ -215,9 +215,12 @@ def simulate(maison_size: int, sku_network: int, buy: int,
         lost_h = d_h - sold_h
         lost_l = d_l - sold_l
 
-        # Per-tier coverage: integer stock divided by store count, capped at 1.
-        pct_h = min(1.0, stock_high / S_high) if S_high > 0 else 0.0
-        pct_l = min(1.0, stock_low  / S_low ) if S_low  > 0 else 0.0
+        # Per-tier coverage, from the SAME pre-sales (post-refill) snapshot
+        # the stock chart uses -- otherwise the two charts contradict (the
+        # post-sales shelf is empty under just-in-time selling, which made
+        # coverage read 0% while the stock chart showed the stores stocked).
+        pct_h = min(1.0, pre_high / S_high) if S_high > 0 else 0.0
+        pct_l = min(1.0, pre_low  / S_low ) if S_low  > 0 else 0.0
 
         states.append(WeekState(t + 1, wh, stock_high, stock_low,
                                  sold_h, sold_l, lost_h, lost_l,
