@@ -189,26 +189,33 @@ with st.expander("\U0001F4CA  Reveal 1 — What happens week by week",
     # (Under demand = buy there is no genuine "above forecast" pool, so the
     # old fourth band was always ~0 and has been removed.)
     # Pre-sales snapshot (after the warehouse refills, before the week's
-    # sales) so the bands show the stock actually sitting in the network
-    # when selling starts -- not the empty shelves left at end of week.
-    # The stores already hold THIS week's demand (pre_high/pre_low), so
-    # everything still in the warehouse is stock held ABOVE the current
-    # week's forecast -- the cushion you'd draw on if the week beat its
-    # forecast (overperform), and which otherwise rolls to later weeks.
-    STOCK_SERIES = [
-        ("In network — high-selling stores", "pre_high", 0, "#1a6b3a"),
-        ("In network — low-selling stores",  "pre_low",  1, "#7fbf7b"),
-        ("Above this week's forecast — in warehouse (potential to overperform)",
-                                              "pre_wh",   2, "#5a7fb0"),
+    # sales). Four stacked bands, summing to total stock on hand:
+    #   1-2. stock on the high / low store shelves (the network).
+    #   3.   the part of the WAREHOUSE that, on its own, would cover this
+    #        week's forecast demand  = min(warehouse, this-week demand).
+    #   4.   the rest of the warehouse -- stock held ABOVE this week's
+    #        forecast, i.e. the cushion that could serve a demand surprise
+    #        (overperform) or roll to later weeks.
+    # The warehouse split (3 vs 4) is computed per week from that week's
+    # demand; the network bands are left untouched.
+    STACK = [
+        ("In network — high-selling stores",                       "#1a6b3a"),
+        ("In network — low-selling stores",                        "#7fbf7b"),
+        ("Warehouse — covers this week's forecast",                "#5a7fb0"),
+        ("Warehouse — above forecast (potential to overperform)",  "#d97757"),
     ]
     rows = []
     for s in r["states"]:
-        for label, attr, order, _col in STOCK_SERIES:
+        d_week = (s.sold_high + s.lost_high) + (s.sold_low + s.lost_low)
+        wh_cover = min(s.pre_wh, d_week)        # warehouse to meet this week
+        wh_over  = s.pre_wh - wh_cover          # warehouse above this week
+        vals = [s.pre_high, s.pre_low, wh_cover, wh_over]
+        for order, (label, _col) in enumerate(STACK):
             rows.append({"week": s.week, "kind": label,
-                         "stock": getattr(s, attr), "order": order})
+                         "stock": vals[order], "order": order})
     df_stock = pd.DataFrame(rows)
-    stock_domain = [lbl for lbl, *_ in STOCK_SERIES]
-    stock_range  = [col for *_, col in STOCK_SERIES]
+    stock_domain = [lbl for lbl, _ in STACK]
+    stock_range  = [col for _, col in STACK]
 
     # Weekly actual demand (high + low) as a line on top of the areas.
     df_demand = pd.DataFrame([
