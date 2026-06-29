@@ -89,6 +89,14 @@ lifespan_months = st.slider("Lifespan (months)",
 # name so you pick visually, not from a word in a radio button. The radio
 # stays as the source of truth; the thumbnails are decoration that updates
 # when you pick a new shape (the selected one renders in the accent blue).
+st.markdown(
+    "<div style='font-size:13px; color:#5a6a80; margin:6px 0 2px;'>"
+    "<b>Demand profile</b> — the shape of weekly sales over the product's "
+    "life (each little curve is units sold per week, from launch on the left "
+    "to end-of-life on the right). 'Ultra-steep' front-loads almost "
+    "everything into the first weeks; 'Flat' spreads it evenly.</div>",
+    unsafe_allow_html=True,
+)
 profile_keys = list(PROFILES.keys())
 _h_preview = horizon_weeks(lifespan_months)
 profile_thumb_cols = st.columns(len(profile_keys))
@@ -183,10 +191,15 @@ with st.expander("\U0001F4CA  Reveal 1 — What happens week by week",
     # Pre-sales snapshot (after the warehouse refills, before the week's
     # sales) so the bands show the stock actually sitting in the network
     # when selling starts -- not the empty shelves left at end of week.
+    # The stores already hold THIS week's demand (pre_high/pre_low), so
+    # everything still in the warehouse is stock held ABOVE the current
+    # week's forecast -- the cushion you'd draw on if the week beat its
+    # forecast (overperform), and which otherwise rolls to later weeks.
     STOCK_SERIES = [
         ("In network — high-selling stores", "pre_high", 0, "#1a6b3a"),
         ("In network — low-selling stores",  "pre_low",  1, "#7fbf7b"),
-        ("In the warehouse (waiting to ship)", "pre_wh", 2, "#5a7fb0"),
+        ("Above this week's forecast — in warehouse (potential to overperform)",
+                                              "pre_wh",   2, "#5a7fb0"),
     ]
     rows = []
     for s in r["states"]:
