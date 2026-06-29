@@ -169,27 +169,19 @@ with st.expander("\U0001F4CA  Reveal 1 — What happens week by week",
                          labelFontSize=11, titleFontSize=12)
     week_scale = alt.Scale(domain=[0, H], nice=False)
 
-    # ── Four-way decomposition of all stock on hand, week by week ──
-    # Stack order (bottom→top): stock in high-selling stores (raw), stock
-    # in low-selling stores (raw), warehouse stock committed to remaining
-    # forecast demand, warehouse buffer beyond forecast needs. The four
-    # series sum to total stock on hand. Stranded stock (units placed in
-    # low-selling stores that won't get served by demand) shows up as the
-    # low-stores band staying high while demand evaporates.
-    # Three-bucket mental model the user laid out: every unit on hand is
-    # either (1) IN NETWORK -- on a store shelf, will sell at forecast;
-    # (2) ABOVE NETWORK but WITHIN FORECAST -- in the warehouse, will be
-    # shipped to fulfil a remaining demand unit; (3) ABOVE NETWORK AND
-    # FORECAST -- no remaining demand to match it (stranded in low-selling
-    # stores, or warehouse excess). The "in network" bucket splits by tier
-    # so the high vs low contribution stays visible.
+    # ── Three-band decomposition of all stock on hand, week by week ──
+    # Stack order (bottom→top): stock on high-selling store shelves, stock
+    # on low-selling store shelves, stock still in the central warehouse.
+    # The three sum EXACTLY to total stock on hand. Stranded stock (units
+    # placed in low-selling stores that demand never reaches) shows up as
+    # the low-stores band staying high while weekly demand evaporates --
+    # that's the misplacement lesson, visible without any extra band.
+    # (Under demand = buy there is no genuine "above forecast" pool, so the
+    # old fourth band was always ~0 and has been removed.)
     STOCK_SERIES = [
-        ("In network — high-selling stores",          "high_committed", 0, "#1a6b3a"),
-        ("In network — low-selling stores",           "low_committed",  1, "#7fbf7b"),
-        ("Above network, within forecast (warehouse, will ship)",
-                                                       "wh_perform",     2, "#5a7fb0"),
-        ("Above network AND forecast (no demand to match)",
-                                                       "overperform",    3, "#d97757"),
+        ("In network — high-selling stores", "stock_high_total", 0, "#1a6b3a"),
+        ("In network — low-selling stores",  "stock_low_total",  1, "#7fbf7b"),
+        ("In the warehouse (waiting to ship)", "wh",             2, "#5a7fb0"),
     ]
     rows = []
     for s in r["states"]:
